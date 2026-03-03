@@ -1,0 +1,88 @@
+# ============================================================
+# DESTINY RESEARCH — .gitignore
+# ============================================================
+
+# ------------------------------------------------------------
+# Data — never committed
+# ------------------------------------------------------------
+data/market_data/**
+data/features/**
+data/alpha/**
+data/**/*.parquet
+data/**/*.bin
+data/**/*.csv
+data/**/*.json
+!data/**/.gitkeep
+
+# ------------------------------------------------------------
+# Python
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ------------------------------------------------------------
+# Jupyter
+# ------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+# Keep notebook outputs in version control (useful for GitHub rendering)
+# Uncomment below to strip outputs before commit
+# *.ipynb filter=jupyternotebook
+
+# ------------------------------------------------------------
+# IDE & editors
+# ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ------------------------------------------------------------
+# Environment & secrets
+# ------------------------------------------------------------
+.env
+.env.*
+*.key
+*.pem
+secrets/
+credentials/
+
+# ------------------------------------------------------------
+# Reports & outputs (figures committed, raw exports not)
+# ------------------------------------------------------------
+reports/figures/*.png
+reports/figures/*.svg
+# Uncomment below to commit figures to GitHub
+# !reports/figures/*.png
+# !reports/figures/*.svg
+
+# ------------------------------------------------------------
+# Logs & profiling
+# ------------------------------------------------------------
+*.log
+*.prof
+*.lprof
