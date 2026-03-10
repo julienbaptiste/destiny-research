@@ -71,6 +71,7 @@ scikit-learn==1.8.0
 scipy==1.17.1
 seaborn==0.13.2
 six==1.17.0
+sortedcontainers==2.4.0
 stack-data==0.6.3
 statsmodels==0.14.6
 threadpoolctl==3.6.0
