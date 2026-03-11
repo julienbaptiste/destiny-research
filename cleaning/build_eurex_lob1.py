@@ -376,7 +376,7 @@ def process_day(
     year = date_str[:4]
     mon  = str(int(date_str[4:6]))   # strip leading zero for Hive path
 
-    out_dir  = output_root / f"year={year}" / f"month={mon}"
+    out_dir  = output_root / f"year={year}" / f"month={mon:02d}"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{product}_{date_str}_lob1.parquet"
 
