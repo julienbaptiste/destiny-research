@@ -13,12 +13,13 @@
 # Output: data/clean/product=<PRODUCT>/year=YYYY/month=MM/<PRODUCT>_YYYYMMDD_orders_clean.parquet
 #
 # Filtering rules (Eurex EOBI, all products):
-#   1. Session filter: Eurex core session 08:00-22:00 CET, weekdays only
+#   1. Session filter: full Eurex session (session_start_cet → session_end_cet), weekdays only
+#      Session times and UTC conversion are defined in eurex_config.py per product.
 #   2. Sentinel prices (INT64_MAX): exclude — market/stop orders without limit price
 #   3. Implied spread legs, negative prices: exclude A/M/C where price <= 0
 #      (Eurex synthetic implied-in/implied-out orders on calendar spreads)
 #   4. Implied spread legs, positive prices: exclude A/M where price deviates
-#      more than 10% from daily median bootstrapped on price > PRICE_FLOOR_FP.
+#      more than 10% from daily median bootstrapped on price > price_floor_fp.
 #      The floor (1000 pts) ensures spread-leg differentials don't contaminate the median.
 #   5. Back months: front month only — most frequent symbol per day.
 #      Prevents multi-contract LOB corruption when multiple expiries coexist in raw file.
@@ -26,51 +27,25 @@
 # No snapshot available for Eurex EOBI — LOB reconstruction starts from zero at
 # session open. Databento snapshots only exist for CME Globex MDP 3.0.
 #
-# Product-specific config (tick size) is driven by PRODUCT_CONFIG dict below.
-# To add a new Eurex product: add one entry to PRODUCT_CONFIG.
+# Product config (tick size, session times, URLs) is defined in eurex_config.py.
+# To add a new Eurex product: add one entry to PRODUCT_CONFIG in eurex_config.py.
 
 import argparse
 import duckdb
 import pyarrow.parquet as pq
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# PRODUCT CONFIG
-# ---------------------------------------------------------------------------
-# tick_size_fp : tick size in fixed-point int64 (price * 1e9)
-#   FDAX : 0.5 pt  → 500_000_000
-#   FESX : 1 pt    → 1_000_000_000
-#   FSMI : 1 pt    → 1_000_000_000
-# price_floor_fp : floor for median bootstrapping — must be above any calendar
-#   spread differential but well below any realistic outright price.
-#   1000 pts * 1e9 = 1_000_000_000_000 works for all three products.
-
-PRODUCT_CONFIG = {
-    "FDAX": {
-        "tick_size_fp":    500_000_000,
-        "price_floor_fp":  1_000_000_000_000,
-        "description":     "DAX Future (Eurex)",
-    },
-    "FESX": {
-        "tick_size_fp":    1_000_000_000,
-        "price_floor_fp":  1_000_000_000_000,
-        "description":     "Euro Stoxx 50 Future (Eurex)",
-    },
-    "FSMI": {
-        "tick_size_fp":    1_000_000_000,
-        "price_floor_fp":  1_000_000_000_000,
-        "description":     "SMI Future (Eurex)",
-    },
-}
+from eurex_config import (
+    PRODUCT_CONFIG,
+    AVAILABLE_PRODUCTS,
+    session_where_clause,
+    ts_utc_expr,
+    ts_local_expr,
+)
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
-
-# Eurex core session boundaries — same for all products
-SESSION_START_LOCAL = "08:00:00"
-SESSION_END_LOCAL   = "22:00:00"
-LOCAL_TZ            = "Europe/Paris"
 
 # Databento sentinel: market/stop orders without limit price
 INT64_MAX = 9_223_372_036_854_775_807
@@ -88,7 +63,7 @@ def parse_args():
         description="Clean Eurex MBO orders — session filter + implied leg removal"
     )
     parser.add_argument(
-        "--product", required=True, choices=list(PRODUCT_CONFIG.keys()),
+        "--product", required=True, choices=AVAILABLE_PRODUCTS,
         help="Product to clean (e.g. FDAX, FESX, FSMI)"
     )
     parser.add_argument(
@@ -114,33 +89,6 @@ def parse_args():
     return parser.parse_args()
 
 # ---------------------------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------------------------
-
-def ts_local_expr(tz: str) -> str:
-    """
-    DuckDB expression to convert ts_recv (UBIGINT nanoseconds UTC) to local TIMESTAMPTZ.
-    Encapsulated here so the conversion pattern is consistent across all queries.
-    Pattern: CAST to BIGINT first (UBIGINT arithmetic not supported), divide by 1e9,
-    convert to UTC timestamp, then shift to local tz.
-    """
-    return f"timezone('{tz}', to_timestamp(CAST(ts_recv AS BIGINT) / 1e9))"
-
-
-def session_where_clause(tz: str, start: str, end: str, date_filter: str = "") -> str:
-    """
-    Build the WHERE clause for session filtering.
-    date_filter: optional extra AND clause (e.g. "AND ts_local::DATE = '2025-05-02'")
-    Uses ISODOW (1=Mon..7=Sun, ISO standard) rather than DAYOFWEEK (ambiguous).
-    """
-    return f"""
-        ISODOW({ts_local_expr(tz)}) BETWEEN 1 AND 5
-        AND {ts_local_expr(tz)}::TIME >= '{start}'::TIME
-        AND {ts_local_expr(tz)}::TIME <  '{end}'::TIME
-        {date_filter}
-    """
-
-# ---------------------------------------------------------------------------
 # DIAGNOSTIC STEPS (run once over full dataset before writing)
 # ---------------------------------------------------------------------------
 
@@ -149,11 +97,14 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
     Full diagnostic pass: raw stats, session stats, sanity checks, flags audit.
     These are informational — output is printed, nothing is written to disk.
     """
-    tick_fp    = cfg["tick_size_fp"]
-    floor_fp   = cfg["price_floor_fp"]
+    tick_fp  = cfg["tick_size_fp"]
+    floor_fp = cfg["price_floor_fp"]
 
     print(f"\n{'='*60}")
     print(f"  DIAGNOSTICS — {product}  ({cfg['description']})")
+    print(f"  Session   : {cfg['session_start_cet']} - {cfg['session_end_cet']} CET")
+    print(f"  RTH       : {cfg['rth_start_cet']} - {cfg['rth_end_cet']} CET")
+    print(f"  Ref       : {cfg['eurex_url']}")
     print(f"{'='*60}")
 
     # ------------------------------------------------------------------
@@ -176,10 +127,9 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
     print(raw.T.to_string())
 
     # ------------------------------------------------------------------
-    # Session stats
+    # Session stats (full session, not RTH)
     # ------------------------------------------------------------------
-    print(f"\n[Diag 2] Session filter: {SESSION_START_LOCAL}-{SESSION_END_LOCAL} {LOCAL_TZ}")
-    ts_local = ts_local_expr(LOCAL_TZ)
+    print(f"\n[Diag 2] Session filter: {cfg['session_start_cet']}-{cfg['session_end_cet']} CET")
     sess = con.execute(f"""
         SELECT
             COUNT(*)                                              AS total_in_session,
@@ -187,9 +137,9 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
             COUNT(*) FILTER (WHERE action = 'C')                 AS n_cancel,
             COUNT(*) FILTER (WHERE action = 'M')                 AS n_modify,
             COUNT(*) FILTER (WHERE action = 'R')                 AS n_clear,
-            COUNT(DISTINCT ({ts_local})::DATE)                   AS trading_days
+            COUNT(DISTINCT {ts_utc_expr()}::DATE)                AS trading_days
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+        WHERE {session_where_clause(cfg)}
     """).fetchdf()
     print(sess.T.to_string())
 
@@ -200,7 +150,7 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
     sanity = con.execute(f"""
         WITH in_session AS (
             SELECT * FROM read_parquet('{glob}', hive_partitioning=true)
-            WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+            WHERE {session_where_clause(cfg)}
         ),
         -- Bootstrap median on outright prices only (floor filters spread legs)
         price_stats AS (
@@ -268,7 +218,7 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
             action,
             COUNT(*)            AS n_records
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+        WHERE {session_where_clause(cfg)}
         GROUP BY flags, f_last, f_tob, f_snapshot, f_bad_ts_recv, f_maybe_bad_book, action
         ORDER BY n_records DESC
         LIMIT 15
@@ -286,7 +236,7 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
             price / 1e9     AS price_pts,
             COUNT(*)        AS n_records
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+        WHERE {session_where_clause(cfg)}
           AND (flags & 8) > 0
         GROUP BY action, flags, price_pts
         ORDER BY n_records DESC
@@ -298,36 +248,43 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
 
 
 # ---------------------------------------------------------------------------
+# INTERNAL HELPER
+# ---------------------------------------------------------------------------
+
+def _date_filter_clause(from_date: str | None, to_date: str | None) -> str:
+    """Build optional AND date range clause for DuckDB queries."""
+    clause = ""
+    if from_date:
+        clause += f" AND {ts_utc_expr()}::DATE >= '{from_date[:4]}-{from_date[4:6]}-{from_date[6:]}'"
+    if to_date:
+        clause += f" AND {ts_utc_expr()}::DATE <= '{to_date[:4]}-{to_date[4:6]}-{to_date[6:]}'"
+    return clause
+
+
+# ---------------------------------------------------------------------------
 # FRONT MONTH MAP
 # ---------------------------------------------------------------------------
 
 def build_front_month_map(
-    con: duckdb.DuckDBPyConnection,
-    glob: str,
+    con:       duckdb.DuckDBPyConnection,
+    glob:      str,
+    cfg:       dict,
     from_date: str | None,
-    to_date: str | None,
+    to_date:   str | None,
 ) -> dict:
     """
     Build a {trade_date -> front_month_symbol} map.
     Front month = most frequent symbol by event count on each day.
-    Works automatically through roll dates: the incoming contract becomes
-    the most frequent symbol on roll day and remains so until next roll.
-
-    Date filtering is applied if from_date / to_date are provided.
+    Works automatically through roll dates.
     """
-    date_filter = ""
-    if from_date:
-        date_filter += f" AND {ts_local_expr(LOCAL_TZ)}::DATE >= '{from_date[:4]}-{from_date[4:6]}-{from_date[6:]}'"
-    if to_date:
-        date_filter += f" AND {ts_local_expr(LOCAL_TZ)}::DATE <= '{to_date[:4]}-{to_date[4:6]}-{to_date[6:]}'"
+    date_filter = _date_filter_clause(from_date, to_date)
 
     result = con.execute(f"""
         SELECT
-            ({ts_local_expr(LOCAL_TZ)})::DATE  AS trade_date,
-            MODE(symbol)                        AS front_month_symbol
+            {ts_utc_expr()}::DATE   AS trade_date,
+            MODE(symbol)            AS front_month_symbol
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
-          {date_filter}
+        WHERE {session_where_clause(cfg, date_filter=date_filter)}
         GROUP BY trade_date
         ORDER BY trade_date
     """).fetchdf()
@@ -340,29 +297,25 @@ def build_front_month_map(
 # ---------------------------------------------------------------------------
 
 def get_trading_days(
-    con: duckdb.DuckDBPyConnection,
-    glob: str,
+    con:       duckdb.DuckDBPyConnection,
+    glob:      str,
+    cfg:       dict,
     from_date: str | None,
-    to_date: str | None,
+    to_date:   str | None,
 ) -> list[dict]:
     """
     Discover distinct trading days present in raw data after session filter.
     Returns list of dicts with keys: trade_date, year, month, date_str.
     """
-    date_filter = ""
-    if from_date:
-        date_filter += f" AND {ts_local_expr(LOCAL_TZ)}::DATE >= '{from_date[:4]}-{from_date[4:6]}-{from_date[6:]}'"
-    if to_date:
-        date_filter += f" AND {ts_local_expr(LOCAL_TZ)}::DATE <= '{to_date[:4]}-{to_date[4:6]}-{to_date[6:]}'"
+    date_filter = _date_filter_clause(from_date, to_date)
 
     rows = con.execute(f"""
         SELECT DISTINCT
-            ({ts_local_expr(LOCAL_TZ)})::DATE                   AS trade_date,
-            YEAR({ts_local_expr(LOCAL_TZ)})                     AS year,
-            MONTH({ts_local_expr(LOCAL_TZ)})                    AS month
+            {ts_utc_expr()}::DATE       AS trade_date,
+            YEAR({ts_utc_expr()})       AS year,
+            MONTH({ts_utc_expr()})      AS month
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
-          {date_filter}
+        WHERE {session_where_clause(cfg, date_filter=date_filter)}
         ORDER BY trade_date
     """).fetchdf()
 
@@ -407,27 +360,20 @@ def write_day_clean(
     if out_path.exists() and not dry_run:
         return {"date": date_str, "skipped": True}
 
+    date_filter = f"AND {ts_utc_expr()}::DATE = '{trade_date}'"
+
     # Count raw events in session for this day (for exclusion rate reporting)
     n_raw = con.execute(f"""
         SELECT COUNT(*) AS n
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(
-            LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL,
-            f"AND {ts_local_expr(LOCAL_TZ)}::DATE = '{trade_date}'"
-        )}
+        WHERE {session_where_clause(cfg, date_filter=date_filter)}
     """).fetchone()[0]
 
-    # Full cleaning query for this day:
-    # CTE price_stats bootstraps daily median on outright prices only.
-    # All five rules applied in WHERE of 'clean' CTE.
     result = con.execute(f"""
         WITH in_session AS (
             SELECT *
             FROM read_parquet('{glob}', hive_partitioning=true)
-            WHERE {session_where_clause(
-                LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL,
-                f"AND {ts_local_expr(LOCAL_TZ)}::DATE = '{trade_date}'"
-            )}
+            WHERE {session_where_clause(cfg, date_filter=date_filter)}
         ),
         price_stats AS (
             -- Bootstrap median on outright prices (floor excludes spread leg differentials)
@@ -483,11 +429,11 @@ def write_day_clean(
     )
 
     return {
-        "date":        date_str,
-        "n_clean":     n_clean,
-        "n_excluded":  n_excluded,
+        "date":         date_str,
+        "n_clean":      n_clean,
+        "n_excluded":   n_excluded,
         "pct_excluded": pct_excl,
-        "skipped":     False,
+        "skipped":      False,
     }
 
 
@@ -500,18 +446,16 @@ def validate_output(
     glob_raw:    str,
     output_root: Path,
     product:     str,
+    cfg:         dict,
 ):
-    """
-    Cross-check total raw (session-filtered) vs total clean event counts.
-    Prints a one-line summary table.
-    """
-    glob_clean = str(output_root / "**" / f"*_orders_clean.parquet")
+    """Cross-check total raw (session-filtered) vs total clean event counts."""
+    glob_clean = str(output_root / "**" / "*_orders_clean.parquet")
 
     result = con.execute(f"""
         WITH raw AS (
             SELECT COUNT(*) AS n_raw
             FROM read_parquet('{glob_raw}', hive_partitioning=true)
-            WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+            WHERE {session_where_clause(cfg)}
         ),
         clean AS (
             SELECT COUNT(*) AS n_clean
@@ -546,7 +490,6 @@ def main():
 
     glob = str(data_root / "**" / "*_orders.parquet")
 
-    # Verify files exist before doing anything
     order_files = sorted(data_root.rglob("*_orders.parquet"))
     if not order_files:
         raise FileNotFoundError(f"No order files found under {data_root}")
@@ -555,6 +498,7 @@ def main():
     print(f"  clean_eurex_orders.py")
     print(f"  Product   : {product}  ({cfg['description']})")
     print(f"  Tick size : {cfg['tick_size_fp'] / 1e9:.1f} pt")
+    print(f"  Session   : {cfg['session_start_cet']} - {cfg['session_end_cet']} CET")
     print(f"  Files     : {len(order_files)} raw order files")
     print(f"  Dry run   : {args.dry_run}")
     if args.from_date:
@@ -565,18 +509,15 @@ def main():
 
     con = duckdb.connect()
 
-    # Diagnostics pass — always runs, regardless of dry_run
     run_diagnostics(con, glob, cfg, product)
 
-    # Build front month map for date range
-    front_month_map = build_front_month_map(con, glob, args.from_date, args.to_date)
+    front_month_map = build_front_month_map(con, glob, cfg, args.from_date, args.to_date)
     print(f"\n[Front months] {front_month_map}")
 
-    # Discover trading days
-    trading_days = get_trading_days(con, glob, args.from_date, args.to_date)
+    trading_days = get_trading_days(con, glob, cfg, args.from_date, args.to_date)
     print(f"\n[Processing] {len(trading_days)} trading days")
 
-    all_stats = []
+    all_stats      = []
     total_clean    = 0
     total_excluded = 0
 
@@ -601,7 +542,6 @@ def main():
             print(f"  [ERROR] {date_str}: {e}")
             all_stats.append({"date": date_str, "error": str(e)})
 
-    # Summary
     print(f"\n{'='*60}")
     print(f"  SUMMARY — {product}")
     print(f"{'='*60}")
@@ -616,9 +556,8 @@ def main():
         print(f"  Total clean    : {total_clean:,}")
         print(f"  Total excluded : {total_excluded:,} ({pct}%)")
 
-    # Post-write validation (skip in dry-run — no output files exist)
     if not args.dry_run and n_ok > 0:
-        validate_output(con, glob, output_root, product)
+        validate_output(con, glob, output_root, product, cfg)
 
 
 if __name__ == "__main__":

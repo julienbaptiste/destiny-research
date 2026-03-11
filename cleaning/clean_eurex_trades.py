@@ -13,7 +13,8 @@
 # Output: data/clean/product=<PRODUCT>/year=YYYY/month=MM/<PRODUCT>_YYYYMMDD_trades_clean.parquet
 #
 # Filtering rules:
-#   1. Session filter: Eurex core session 08:00-22:00 CET, weekdays only
+#   1. Session filter: full Eurex session (session_start_cet → session_end_cet), weekdays only
+#      Session times and UTC conversion are defined in eurex_config.py per product.
 #   2. Implied spread trades: exclude price <= 0 (calendar spread differentials)
 #   3. Back months: front month only — MODE(symbol) per day, must match orders_clean
 #
@@ -26,43 +27,25 @@
 # Important: front month selection must be consistent with clean_eurex_orders.py.
 # Both scripts use MODE(symbol) per day — guaranteed to agree as long as the
 # same raw data is used and roll dates are identical across orders and trades files.
+#
+# Product config (tick size, session times, URLs) is defined in eurex_config.py.
+# To add a new Eurex product: add one entry to PRODUCT_CONFIG in eurex_config.py.
 
 import argparse
 import duckdb
 import pyarrow.parquet as pq
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# PRODUCT CONFIG
-# ---------------------------------------------------------------------------
-# Mirrors clean_eurex_orders.py exactly — must stay in sync.
-# tick_size_fp used for diagnostic tick violation check only (not a filter).
-
-PRODUCT_CONFIG = {
-    "FDAX": {
-        "tick_size_fp":    500_000_000,
-        "price_floor_fp":  1_000_000_000_000,
-        "description":     "DAX Future (Eurex)",
-    },
-    "FESX": {
-        "tick_size_fp":    1_000_000_000,
-        "price_floor_fp":  1_000_000_000_000,
-        "description":     "Euro Stoxx 50 Future (Eurex)",
-    },
-    "FSMI": {
-        "tick_size_fp":    1_000_000_000,
-        "price_floor_fp":  1_000_000_000_000,
-        "description":     "SMI Future (Eurex)",
-    },
-}
+from eurex_config import (
+    PRODUCT_CONFIG,
+    AVAILABLE_PRODUCTS,
+    session_where_clause,
+    ts_utc_expr,
+)
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
-
-SESSION_START_LOCAL = "08:00:00"
-SESSION_END_LOCAL   = "22:00:00"
-LOCAL_TZ            = "Europe/Paris"
 
 INT64_MAX    = 9_223_372_036_854_775_807
 OUTLIER_BAND = 0.10
@@ -76,7 +59,7 @@ def parse_args():
         description="Clean Eurex MBO trades — session filter + implied spread removal"
     )
     parser.add_argument(
-        "--product", required=True, choices=list(PRODUCT_CONFIG.keys()),
+        "--product", required=True, choices=AVAILABLE_PRODUCTS,
         help="Product to clean (e.g. FDAX, FESX, FSMI)"
     )
     parser.add_argument(
@@ -102,22 +85,17 @@ def parse_args():
     return parser.parse_args()
 
 # ---------------------------------------------------------------------------
-# HELPERS — identical to clean_eurex_orders.py
+# INTERNAL HELPER
 # ---------------------------------------------------------------------------
 
-def ts_local_expr(tz: str) -> str:
-    """UBIGINT nanoseconds UTC → local TIMESTAMPTZ."""
-    return f"timezone('{tz}', to_timestamp(CAST(ts_recv AS BIGINT) / 1e9))"
-
-
-def session_where_clause(tz: str, start: str, end: str, date_filter: str = "") -> str:
-    """WHERE clause for Eurex session filter + optional date restriction."""
-    return f"""
-        ISODOW({ts_local_expr(tz)}) BETWEEN 1 AND 5
-        AND {ts_local_expr(tz)}::TIME >= '{start}'::TIME
-        AND {ts_local_expr(tz)}::TIME <  '{end}'::TIME
-        {date_filter}
-    """
+def _date_filter_clause(from_date: str | None, to_date: str | None) -> str:
+    """Build optional AND date range clause for DuckDB queries."""
+    clause = ""
+    if from_date:
+        clause += f" AND {ts_utc_expr()}::DATE >= '{from_date[:4]}-{from_date[4:6]}-{from_date[6:]}'"
+    if to_date:
+        clause += f" AND {ts_utc_expr()}::DATE <= '{to_date[:4]}-{to_date[4:6]}-{to_date[6:]}'"
+    return clause
 
 # ---------------------------------------------------------------------------
 # DIAGNOSTIC STEPS
@@ -133,6 +111,9 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
 
     print(f"\n{'='*60}")
     print(f"  DIAGNOSTICS — {product} trades  ({cfg['description']})")
+    print(f"  Session   : {cfg['session_start_cet']} - {cfg['session_end_cet']} CET")
+    print(f"  RTH       : {cfg['rth_start_cet']} - {cfg['rth_end_cet']} CET")
+    print(f"  Ref       : {cfg['eurex_url']}")
     print(f"{'='*60}")
 
     # ------------------------------------------------------------------
@@ -156,7 +137,7 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
     # ------------------------------------------------------------------
     # Session stats + T/F pairing check
     # ------------------------------------------------------------------
-    print(f"\n[Diag 2] Session filter + T/F pairing: {SESSION_START_LOCAL}-{SESSION_END_LOCAL} {LOCAL_TZ}")
+    print(f"\n[Diag 2] Session filter + T/F pairing: {cfg['session_start_cet']}-{cfg['session_end_cet']} CET")
     sess = con.execute(f"""
         SELECT
             COUNT(*)                                                AS total_in_session,
@@ -166,11 +147,11 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
             -- Delta < 0 would indicate a data integrity issue
             COUNT(*) FILTER (WHERE action = 'T') -
             COUNT(*) FILTER (WHERE action = 'F')                   AS t_minus_f_delta,
-            COUNT(DISTINCT ({ts_local_expr(LOCAL_TZ)})::DATE)      AS trading_days,
+            COUNT(DISTINCT {ts_utc_expr()}::DATE)                   AS trading_days,
             SUM(CASE WHEN action = 'T' THEN size ELSE 0 END)       AS total_volume_contracts,
             ROUND(AVG(CASE WHEN action = 'T' THEN size END), 2)    AS avg_trade_size
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+        WHERE {session_where_clause(cfg)}
     """).fetchdf()
     print(sess.T.to_string())
 
@@ -181,7 +162,7 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
     sanity = con.execute(f"""
         WITH in_session AS (
             SELECT * FROM read_parquet('{glob}', hive_partitioning=true)
-            WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+            WHERE {session_where_clause(cfg)}
         ),
         price_stats AS (
             SELECT APPROX_QUANTILE(price, 0.5) AS price_median
@@ -206,7 +187,7 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
             SUM(CASE WHEN size <= 0
                  THEN 1 ELSE 0 END)                              AS size_nonpositive,
             -- Unpaired T: aggressor with no corresponding passive F
-            -- Approximated here as T with flags=128 and no F at same ts_recv
+            -- Approximated as T with flags=128 and no F at same ts_recv
             SUM(CASE WHEN action = 'T' AND flags = 128
                  THEN 1 ELSE 0 END)                              AS n_unpaired_aggressor,
             SUM(CASE WHEN ts_event > ts_recv
@@ -251,7 +232,7 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
             MIN(price) / 1e9    AS price_min_pts,
             MAX(price) / 1e9    AS price_max_pts
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+        WHERE {session_where_clause(cfg)}
         GROUP BY flags, f_last, f_tob, f_bad_ts_recv, f_maybe_bad_book, action
         ORDER BY n_records DESC
         LIMIT 10
@@ -266,15 +247,15 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
         SELECT
             action,
             flags,
-            price / 1e9                             AS price_pts,
+            price / 1e9                         AS price_pts,
             size,
-            DATE_PART('hour', {ts_local_expr(LOCAL_TZ)})  AS hour_local,
-            ({ts_local_expr(LOCAL_TZ)})::DATE       AS date_local,
-            COUNT(*)                                AS n_records
+            DATE_PART('hour', {ts_utc_expr()})  AS hour_utc,
+            {ts_utc_expr()}::DATE               AS date_utc,
+            COUNT(*)                            AS n_records
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+        WHERE {session_where_clause(cfg)}
           AND price <= 0
-        GROUP BY action, flags, price_pts, size, hour_local, date_local
+        GROUP BY action, flags, price_pts, size, hour_utc, date_utc
         ORDER BY n_records DESC
         LIMIT 20
     """).fetchdf()
@@ -285,12 +266,13 @@ def run_diagnostics(con: duckdb.DuckDBPyConnection, glob: str, cfg: dict, produc
 
 
 # ---------------------------------------------------------------------------
-# FRONT MONTH MAP — must mirror clean_eurex_orders.py exactly
+# FRONT MONTH MAP
 # ---------------------------------------------------------------------------
 
 def build_front_month_map(
     con:       duckdb.DuckDBPyConnection,
     glob:      str,
+    cfg:       dict,
     from_date: str | None,
     to_date:   str | None,
 ) -> dict:
@@ -300,19 +282,14 @@ def build_front_month_map(
     Consistency with orders_clean is guaranteed when both scripts run on the
     same date range and the same raw data.
     """
-    date_filter = ""
-    if from_date:
-        date_filter += f" AND {ts_local_expr(LOCAL_TZ)}::DATE >= '{from_date[:4]}-{from_date[4:6]}-{from_date[6:]}'"
-    if to_date:
-        date_filter += f" AND {ts_local_expr(LOCAL_TZ)}::DATE <= '{to_date[:4]}-{to_date[4:6]}-{to_date[6:]}'"
+    date_filter = _date_filter_clause(from_date, to_date)
 
     result = con.execute(f"""
         SELECT
-            ({ts_local_expr(LOCAL_TZ)})::DATE   AS trade_date,
-            MODE(symbol)                         AS front_month_symbol
+            {ts_utc_expr()}::DATE   AS trade_date,
+            MODE(symbol)            AS front_month_symbol
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
-          {date_filter}
+        WHERE {session_where_clause(cfg, date_filter=date_filter)}
         GROUP BY trade_date
         ORDER BY trade_date
     """).fetchdf()
@@ -327,23 +304,19 @@ def build_front_month_map(
 def get_trading_days(
     con:       duckdb.DuckDBPyConnection,
     glob:      str,
+    cfg:       dict,
     from_date: str | None,
     to_date:   str | None,
 ) -> list[dict]:
-    date_filter = ""
-    if from_date:
-        date_filter += f" AND {ts_local_expr(LOCAL_TZ)}::DATE >= '{from_date[:4]}-{from_date[4:6]}-{from_date[6:]}'"
-    if to_date:
-        date_filter += f" AND {ts_local_expr(LOCAL_TZ)}::DATE <= '{to_date[:4]}-{to_date[4:6]}-{to_date[6:]}'"
+    date_filter = _date_filter_clause(from_date, to_date)
 
     rows = con.execute(f"""
         SELECT DISTINCT
-            ({ts_local_expr(LOCAL_TZ)})::DATE               AS trade_date,
-            YEAR({ts_local_expr(LOCAL_TZ)})                 AS year,
-            MONTH({ts_local_expr(LOCAL_TZ)})                AS month
+            {ts_utc_expr()}::DATE       AS trade_date,
+            YEAR({ts_utc_expr()})       AS year,
+            MONTH({ts_utc_expr()})      AS month
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
-          {date_filter}
+        WHERE {session_where_clause(cfg, date_filter=date_filter)}
         ORDER BY trade_date
     """).fetchdf()
 
@@ -369,6 +342,7 @@ def write_day_clean(
     date_info:   dict,
     front_month: str,
     output_root: Path,
+    cfg:         dict,
     dry_run:     bool,
 ) -> dict:
     """
@@ -394,24 +368,20 @@ def write_day_clean(
     if out_path.exists() and not dry_run:
         return {"date": date_str, "skipped": True}
 
+    date_filter = f"AND {ts_utc_expr()}::DATE = '{trade_date}'"
+
     # Raw count for exclusion rate
     n_raw = con.execute(f"""
         SELECT COUNT(*) AS n
         FROM read_parquet('{glob}', hive_partitioning=true)
-        WHERE {session_where_clause(
-            LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL,
-            f"AND {ts_local_expr(LOCAL_TZ)}::DATE = '{trade_date}'"
-        )}
+        WHERE {session_where_clause(cfg, date_filter=date_filter)}
     """).fetchone()[0]
 
     result = con.execute(f"""
         WITH in_session AS (
             SELECT *
             FROM read_parquet('{glob}', hive_partitioning=true)
-            WHERE {session_where_clause(
-                LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL,
-                f"AND {ts_local_expr(LOCAL_TZ)}::DATE = '{trade_date}'"
-            )}
+            WHERE {session_where_clause(cfg, date_filter=date_filter)}
               -- Rule 2: exclude implied spread trades (negative price differentials)
               AND price > 0
               -- Rule 3: front month only — must match orders_clean for same day
@@ -477,6 +447,7 @@ def validate_output(
     glob_raw:    str,
     output_root: Path,
     product:     str,
+    cfg:         dict,
 ):
     """Raw vs clean total count cross-check."""
     glob_clean = str(output_root / "**" / "*_trades_clean.parquet")
@@ -485,7 +456,7 @@ def validate_output(
         WITH raw AS (
             SELECT COUNT(*) AS n_raw
             FROM read_parquet('{glob_raw}', hive_partitioning=true)
-            WHERE {session_where_clause(LOCAL_TZ, SESSION_START_LOCAL, SESSION_END_LOCAL)}
+            WHERE {session_where_clause(cfg)}
         ),
         clean AS (
             SELECT COUNT(*) AS n_clean
@@ -528,6 +499,7 @@ def main():
     print(f"  clean_eurex_trades.py")
     print(f"  Product   : {product}  ({cfg['description']})")
     print(f"  Tick size : {cfg['tick_size_fp'] / 1e9:.1f} pt")
+    print(f"  Session   : {cfg['session_start_cet']} - {cfg['session_end_cet']} CET")
     print(f"  Files     : {len(trade_files)} raw trade files")
     print(f"  Dry run   : {args.dry_run}")
     if args.from_date:
@@ -540,10 +512,10 @@ def main():
 
     run_diagnostics(con, glob, cfg, product)
 
-    front_month_map = build_front_month_map(con, glob, args.from_date, args.to_date)
+    front_month_map = build_front_month_map(con, glob, cfg, args.from_date, args.to_date)
     print(f"\n[Front months] {front_month_map}")
 
-    trading_days = get_trading_days(con, glob, args.from_date, args.to_date)
+    trading_days = get_trading_days(con, glob, cfg, args.from_date, args.to_date)
     print(f"\n[Processing] {len(trading_days)} trading days")
 
     all_stats      = []
@@ -561,7 +533,7 @@ def main():
 
         try:
             stats = write_day_clean(
-                con, glob, product, day, front_month, output_root, args.dry_run
+                con, glob, product, day, front_month, output_root, cfg, args.dry_run
             )
             all_stats.append(stats)
             if not stats.get("skipped"):
@@ -571,7 +543,6 @@ def main():
             print(f"  [ERROR] {date_str}: {e}")
             all_stats.append({"date": date_str, "error": str(e)})
 
-    # Summary
     print(f"\n{'='*60}")
     print(f"  SUMMARY — {product} trades")
     print(f"{'='*60}")
@@ -587,7 +558,7 @@ def main():
         print(f"  Total excluded : {total_excluded:,} ({pct}%)")
 
     if not args.dry_run and n_ok > 0:
-        validate_output(con, glob, output_root, product)
+        validate_output(con, glob, output_root, product, cfg)
 
 
 if __name__ == "__main__":

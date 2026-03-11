@@ -26,13 +26,16 @@
 #   - No snapshot available — LOB builds from zero at session open.
 #     First ~1-2 min of session have incomplete book (burn-in period).
 #     Filter ts_recv > session_open + 120s in downstream analysis.
-#   - Modify (M): size change only, never price (verified on FDAX).
+#   - Modify (M): size change only, never price (verified on FDAX/FESX/FSMI).
 #     If price change detected at runtime -> treated as Cancel + Add.
 #   - CleaR (R): full book reset. Rare in-session (reconnect / Eurex failover).
 #
 # Output schema (fixed-point int64 prices throughout, divide by 1e9 for points):
 #   ts_recv, ts_event, sequence, order_id, action, side, price, size, flags,
 #   bid_px, bid_sz, ask_px, ask_sz, mid_px, spread, tob_changed, source
+#
+# Product config (tick size, session times, URLs) is defined in eurex_config.py.
+# To add a new Eurex product: add one entry to PRODUCT_CONFIG in eurex_config.py.
 
 import argparse
 import logging
@@ -44,31 +47,17 @@ import pyarrow.compute as pc
 from pathlib import Path
 from sortedcontainers import SortedList
 
+from eurex_config import (
+    PRODUCT_CONFIG,
+    AVAILABLE_PRODUCTS,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# PRODUCT CONFIG
-# ---------------------------------------------------------------------------
-
-PRODUCT_CONFIG = {
-    "FDAX": {
-        "tick_size_fp": 500_000_000,    # 0.5 pt * 1e9
-        "description":  "DAX Future (Eurex)",
-    },
-    "FESX": {
-        "tick_size_fp": 1_000_000_000,  # 1 pt * 1e9
-        "description":  "Euro Stoxx 50 Future (Eurex)",
-    },
-    "FSMI": {
-        "tick_size_fp": 1_000_000_000,  # 1 pt * 1e9
-        "description":  "SMI Future (Eurex)",
-    },
-}
 
 # Fixed-point scale (all Databento prices: raw int64 * 1e-9 = points)
 FP_SCALE = 1_000_000_000
@@ -618,7 +607,7 @@ def parse_args():
         description="Eurex MBO LOB Level 1 reconstruction"
     )
     parser.add_argument(
-        "--product", required=True, choices=list(PRODUCT_CONFIG.keys()),
+        "--product", required=True, choices=AVAILABLE_PRODUCTS,
         help="Product to process"
     )
     parser.add_argument(

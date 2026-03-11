@@ -18,22 +18,25 @@
 # can still be run independently. Failures in one product do not abort others.
 # A cross-product summary is printed at the end.
 #
+# To add a new Eurex product to the pipeline: add one entry to eurex_config.py.
+# This script will pick it up automatically via AVAILABLE_PRODUCTS.
+#
 # Exit code: 0 if all steps succeeded for all products, 1 if any step failed.
 
 import argparse
 import subprocess
 import sys
 import time
-from pathlib import Path
+
+from eurex_config import AVAILABLE_PRODUCTS
 
 # ---------------------------------------------------------------------------
-# AVAILABLE PRODUCTS & STEPS
+# STEPS CONFIG
 # ---------------------------------------------------------------------------
 
-AVAILABLE_PRODUCTS = ["FDAX", "FESX", "FSMI"]
-AVAILABLE_STEPS    = ["orders", "trades", "lob1"]
+AVAILABLE_STEPS = ["orders", "trades", "lob1"]
 
-# Map step name -> script path (relative to repo root, adjust if needed)
+# Map step name -> script path (relative to repo root — adjust if layout changes)
 STEP_SCRIPTS = {
     "orders": "cleaning/clean_eurex_orders.py",
     "trades": "cleaning/clean_eurex_trades.py",
@@ -102,9 +105,9 @@ Examples:
 # ---------------------------------------------------------------------------
 
 def run_step(
-    step:        str,
-    product:     str,
-    args:        argparse.Namespace,
+    step:    str,
+    product: str,
+    args:    argparse.Namespace,
 ) -> tuple[int, float]:
     """
     Build and execute the subprocess command for one pipeline step.
@@ -113,11 +116,11 @@ def run_step(
     """
     script = STEP_SCRIPTS[step]
 
-    # Base command: run with the same Python interpreter as this process
-    # ensures the correct venv is used without requiring explicit activation
+    # Base command: run with the same Python interpreter as this process —
+    # ensures the correct venv is used without requiring explicit activation.
     cmd = [sys.executable, script, "--product", product]
 
-    # Date range (shared by all three scripts)
+    # Date range — shared by all three scripts
     if args.from_date:
         cmd += ["--from-date", args.from_date]
     if args.to_date:
@@ -125,17 +128,17 @@ def run_step(
 
     # Step-specific flags
     if step in ("orders", "trades"):
-        cmd += ["--data-root",    args.data_root]
-        cmd += ["--output-root",  args.output_root_clean]
+        cmd += ["--data-root",   args.data_root]
+        cmd += ["--output-root", args.output_root_clean]
         if args.dry_run:
             cmd.append("--dry-run")
 
     elif step == "lob1":
-        cmd += ["--clean-root",   args.output_root_clean]
-        cmd += ["--output-root",  args.output_root_lob1]
+        cmd += ["--clean-root",  args.output_root_clean]
+        cmd += ["--output-root", args.output_root_lob1]
         if args.no_validate:
             cmd.append("--no-validate")
-        # lob1 skipped entirely in dry-run: no clean files exist yet (or by design)
+        # lob1 skipped entirely in dry-run — no clean files exist yet (or by design)
         if args.dry_run:
             print(f"  [DRY] lob1 skipped (--dry-run)")
             return 0, 0.0
@@ -143,7 +146,7 @@ def run_step(
     print(f"\n  $ {' '.join(cmd)}")
     t0 = time.time()
 
-    # stream=True: no buffering — logs from subprocess appear in real time
+    # No stdout/stderr capture — subprocess logs stream to terminal in real time
     result = subprocess.run(cmd)
 
     elapsed = time.time() - t0
@@ -157,7 +160,7 @@ def run_step(
 def main():
     args = parse_args()
 
-    # Preserve step order regardless of user input order
+    # Preserve canonical step order regardless of user input order
     steps_to_run = [s for s in AVAILABLE_STEPS if s in args.steps]
 
     print(f"\n{'='*60}")
@@ -171,7 +174,7 @@ def main():
         print(f"  To date   : {args.to_date}")
     print(f"{'='*60}")
 
-    # Track results: results[product][step] = (returncode, elapsed_s)
+    # results[product][step] = (returncode, elapsed_s)
     results: dict[str, dict[str, tuple[int, float]]] = {}
     pipeline_t0 = time.time()
 
@@ -191,7 +194,7 @@ def main():
                     f"\n  [FAIL] {product} / {step} "
                     f"returned exit code {rc} — skipping remaining steps for {product}"
                 )
-                # Mark remaining steps for this product as skipped
+                # Fail-fast per product: mark remaining steps as skipped
                 remaining = steps_to_run[steps_to_run.index(step) + 1:]
                 for skipped_step in remaining:
                     results[product][skipped_step] = ("SKIPPED", 0.0)
@@ -206,8 +209,7 @@ def main():
     print(f"  PIPELINE SUMMARY  ({pipeline_elapsed}s total)")
     print(f"{'='*60}")
 
-    # Header
-    col_w = 10
+    col_w  = 12
     header = f"  {'Product':<8}" + "".join(f"{s:>{col_w}}" for s in steps_to_run)
     print(header)
     print(f"  {'-'*8}" + f"{'-'*col_w}" * len(steps_to_run))
