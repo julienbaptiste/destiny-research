@@ -1,0 +1,18 @@
+{
+  "product": "FESX",
+  "date": "2025-05-12",
+  "pipeline_version": "eurex_v1",
+  "orders_clean_row_count": 4073487,
+  "trades_clean_row_count": 358579,
+  "trades_unpaired_aggressor_count": 173,
+  "lob1_row_count": 4432066,
+  "tob_change_count": 53927,
+  "tob_change_rate": 0.012167,
+  "crossed_book_count": 22,
+  "spread_median": 1000000000,
+  "spread_p25": 1000000000,
+  "spread_p75": 1000000000,
+  "spread_p95": 2000000000,
+  "lob1_sample_checksum_sha256": "1dcdb3fad54971c775c3d4b21860916f461071b984b808327b126016c61b34a4",
+  "lob1_sample_rows_used": 50000
+}

@@ -1,0 +1,18 @@
+{
+  "product": "FSMI",
+  "date": "2025-05-12",
+  "pipeline_version": "eurex_v1",
+  "orders_clean_row_count": 762358,
+  "trades_clean_row_count": 44252,
+  "trades_unpaired_aggressor_count": 15,
+  "lob1_row_count": 806610,
+  "tob_change_count": 50958,
+  "tob_change_rate": 0.063176,
+  "crossed_book_count": 2,
+  "spread_median": 2000000000,
+  "spread_p25": 2000000000,
+  "spread_p75": 3000000000,
+  "spread_p95": 4000000000,
+  "lob1_sample_checksum_sha256": "b0c6ddec3e005561e96bf1defed3717a0dd0807c62346329fba1021d7e498cb9",
+  "lob1_sample_rows_used": 50000
+}

@@ -1,0 +1,18 @@
+{
+  "product": "FDAX",
+  "date": "2025-05-12",
+  "pipeline_version": "eurex_v1",
+  "orders_clean_row_count": 3497819,
+  "trades_clean_row_count": 70469,
+  "trades_unpaired_aggressor_count": 29,
+  "lob1_row_count": 3568288,
+  "tob_change_count": 165670,
+  "tob_change_rate": 0.046428,
+  "crossed_book_count": 0,
+  "spread_median": 3000000000,
+  "spread_p25": 3000000000,
+  "spread_p75": 4000000000,
+  "spread_p95": 6000000000,
+  "lob1_sample_checksum_sha256": "e105631d72c6911ce823c3050cf1bc9ee7f2bc0a7808a74a54dd55e1e11f76ae",
+  "lob1_sample_rows_used": 50000
+}
