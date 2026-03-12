@@ -1,0 +1,17 @@
+{
+  "product": "ES",
+  "date": "2025-10-10",
+  "pipeline_version": "cme_v1",
+  "orders_clean_row_count": 11462286,
+  "trades_clean_row_count": 1889503,
+  "lob1_row_count": 13351789,
+  "tob_change_count": 709264,
+  "tob_change_rate": 0.053121,
+  "crossed_book_count": 42,
+  "spread_median": 250000000,
+  "spread_p25": 250000000,
+  "spread_p75": 250000000,
+  "spread_p95": 500000000,
+  "lob1_sample_checksum_sha256": "fc6300f9522ce408d1de539684f42c99009e4e01dd4190967a3bf438c870e462",
+  "lob1_sample_rows_used": 50000
+}
