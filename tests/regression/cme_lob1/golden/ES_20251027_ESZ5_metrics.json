@@ -1,0 +1,22 @@
+{
+  "product": "ES",
+  "symbol": "ESZ5",
+  "date": "2025-10-27",
+  "pipeline_version": "cme_lob1",
+  "lob1_row_count": 7432779,
+  "action_A_count": 2930724,
+  "action_C_count": 2922633,
+  "action_M_count": 536304,
+  "action_T_count": 296030,
+  "action_F_count": 747088,
+  "action_R_count": 0,
+  "tob_change_count": 153270,
+  "tob_change_rate": 0.020621,
+  "crossed_book_count": 6235,
+  "spread_median": 250000000,
+  "spread_p25": 250000000,
+  "spread_p75": 250000000,
+  "spread_p95": 500000000,
+  "lob1_sample_checksum_sha256": "e4c491f1921a7d0b35957faf9e5d27768a5a5e69293c9ca3994b70de1950366e",
+  "lob1_sample_rows_used": 50000
+}

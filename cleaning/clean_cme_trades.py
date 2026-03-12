@@ -54,7 +54,7 @@ from cme_config import (
 
 # ── Repository layout ──────────────────────────────────────────────────────────
 DATA_ROOT   = Path("data/market_data")
-OUTPUT_ROOT = Path("data/market_data")
+OUTPUT_ROOT = Path("data/clean")
 
 # ── Output schema ──────────────────────────────────────────────────────────────
 # Identical to orders schema — no extra columns needed.

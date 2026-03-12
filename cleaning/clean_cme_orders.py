@@ -53,7 +53,7 @@ from cme_config import (
 
 # ── Repository layout (relative to destiny-research root) ─────────────────────
 DATA_ROOT    = Path("data/market_data")
-OUTPUT_ROOT  = Path("data/market_data")   # clean files land alongside raw files
+OUTPUT_ROOT  = Path("data/clean")
 
 # ── Output schema ──────────────────────────────────────────────────────────────
 # Subset of columns retained from raw Parquet — same as Eurex cleaner.
@@ -254,7 +254,7 @@ def clean_day(
     # ── Step 3: session filter count ──────────────────────────────────────────
     # Count rows that pass rules 1-3 but fall outside the session window.
     # This tells us how many pre-market / post-market / maintenance rows exist.
-    rth_start, rth_end = rth_utc_bounds(d)
+    rth_start, rth_end = rth_utc_bounds(d, cfg)
     session_clause = session_where_clause(cfg, use_rth, d)
     utc_expr = ts_utc_expr("ts_recv")
 

@@ -10,7 +10,7 @@
 #   This avoids per-row timezone() calls on 50M+ rows and is DST-safe.
 #
 # To add a new Eurex product: add one entry to PRODUCT_CONFIG.
-# Verify session times at the product's eurex_url before adding.
+# Verify session times at the product's product_url before adding.
 
 # ---------------------------------------------------------------------------
 # PRODUCT CONFIG
@@ -21,7 +21,7 @@ PRODUCT_CONFIG = {
         "tick_size_fp":      500_000_000,       # 0.5 pt * 1e9
         "price_floor_fp":    1_000_000_000_000, # 1000 pt * 1e9 — median bootstrap floor
         "description":       "DAX Future (Eurex)",
-        "eurex_url":         "https://www.eurex.com/ex-en/markets/idx/dax/DAX-Futures-139902",
+        "product_url":       "https://www.eurex.com/ex-en/markets/idx/dax/DAX-Futures-139902",
         # All times CET (UTC+1) — Eurex does NOT adjust for DST
         "session_start_cet": "01:10:00",        # continuous trading open
         "session_end_cet":   "22:00:00",        # closing auction start
@@ -32,7 +32,7 @@ PRODUCT_CONFIG = {
         "tick_size_fp":      1_000_000_000,     # 1 pt * 1e9
         "price_floor_fp":    1_000_000_000_000,
         "description":       "Euro Stoxx 50 Future (Eurex)",
-        "eurex_url":         "https://www.eurex.com/ex-en/markets/idx/stx/euro-stoxx-50-derivatives/products/EURO-STOXX-50-Index-Futures-160088",
+        "product_url":       "https://www.eurex.com/ex-en/markets/idx/stx/euro-stoxx-50-derivatives/products/EURO-STOXX-50-Index-Futures-160088",
         # All times CET (UTC+1) — Eurex does NOT adjust for DST
         "session_start_cet": "01:10:00",
         "session_end_cet":   "22:00:00",
@@ -43,7 +43,7 @@ PRODUCT_CONFIG = {
         "tick_size_fp":      1_000_000_000,     # 1 pt * 1e9
         "price_floor_fp":    1_000_000_000_000,
         "description":       "SMI Future (Eurex)",
-        "eurex_url":         "https://www.eurex.com/ex-en/markets/idx/country/six/SMI-Futures-952762",
+        "product_url":       "https://www.eurex.com/ex-en/markets/idx/country/six/SMI-Futures-952762",
         # All times CET (UTC+1) — Eurex does NOT adjust for DST
         # FSMI opens later than FDAX/FESX — SIX Exchange hours
         "session_start_cet": "07:50:00",
