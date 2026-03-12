@@ -6,6 +6,8 @@
 # Data — never committed
 # ------------------------------------------------------------
 data/market_data/**
+data/market_data_mbp_1/**
+data/raw_market_data/**
 data/features/**
 data/alpha/**
 data/**/*.parquet
