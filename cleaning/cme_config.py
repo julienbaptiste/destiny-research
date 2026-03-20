@@ -125,7 +125,7 @@ def rth_utc_bounds(d: date, cfg: dict | None = None) -> tuple[str, str]:
 PRODUCT_CONFIG: dict[str, dict] = {
     "ES": {
         # E-mini S&P 500 Future — CME Globex
-        # Source: https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.html
+        # Source: https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.contractSpecs.html
         # Dataset: GLBX.MDP3 (Databento)
         "tick_size_fp":      250_000_000,        # 0.25 pt * 1e9
         "price_floor_fp":    500_000_000_000,    # 500 pts * 1e9
@@ -134,7 +134,7 @@ PRODUCT_CONFIG: dict[str, dict] = {
         "exchange":          "CME",
         "databento_dataset": "GLBX.MDP3",
         "description":       "E-mini S&P 500 Future (CME Globex)",
-        "product_url":       "https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.html",
+        "product_url":       "https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.contractSpecs.html",
         # Electronic session (UTC)
         "session_open_utc":  "22:00:00",   # prev day 22:00 UTC
         "session_close_utc": "21:00:00",   # today 21:00 UTC
@@ -151,7 +151,7 @@ PRODUCT_CONFIG: dict[str, dict] = {
     },
     "NIY": {
         # Nikkei 225 Future (JPY-denominated) — CME Globex
-        # Source: https://www.cmegroup.com/markets/equities/nikkei/nikkei-225-yen.html
+        # Source: https://www.cmegroup.com/markets/equities/international-indices/nikkei-225-yen.contractSpecs.html
         # Dataset: GLBX.MDP3 (Databento)
         # Same Globex session as ES (18:00–17:00 ET, maintenance 17:00–18:00 ET)
         #
@@ -175,7 +175,7 @@ PRODUCT_CONFIG: dict[str, dict] = {
         "exchange":          "CME",
         "databento_dataset": "GLBX.MDP3",
         "description":       "Nikkei 225 Future JPY (CME Globex)",
-        "product_url":       "https://www.cmegroup.com/markets/equities/nikkei/nikkei-225-yen.html",
+        "product_url":       "https://www.cmegroup.com/markets/equities/international-indices/nikkei-225-yen.contractSpecs.html",
         # Electronic session (UTC) — identical to ES
         "session_open_utc":  "22:00:00",
         "session_close_utc": "21:00:00",
@@ -192,7 +192,7 @@ PRODUCT_CONFIG: dict[str, dict] = {
     },
     "NKD": {
         # Nikkei 225 Future (USD-denominated) — CME Globex
-        # Source: https://www.cmegroup.com/markets/equities/nikkei/nikkei-225-dollar.html
+        # Source: https://www.cmegroup.com/markets/equities/international-indices/nikkei-225-dollar.contractSpecs.html
         # Dataset: GLBX.MDP3 (Databento)
         # Same Globex session and RTH as NIY — same underlying, different currency
         # See NIY comments for RTH rationale (11:00–15:15 JST = 02:00–06:15 UTC)
@@ -203,7 +203,7 @@ PRODUCT_CONFIG: dict[str, dict] = {
         "exchange":          "CME",
         "databento_dataset": "GLBX.MDP3",
         "description":       "Nikkei 225 Future USD (CME Globex)",
-        "product_url":       "https://www.cmegroup.com/markets/equities/nikkei/nikkei-225-dollar.html",
+        "product_url":       "hhttps://www.cmegroup.com/markets/equities/international-indices/nikkei-225-dollar.contractSpecs.html",
         # Electronic session (UTC) — identical to ES
         "session_open_utc":  "22:00:00",
         "session_close_utc": "21:00:00",

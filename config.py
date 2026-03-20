@@ -1,15 +1,12 @@
 from pathlib import Path
 
-# ─── Changer cette ligne uniquement si tu déplaces la donnée ───
-DATA_ROOT = Path.home() / "repo" / "destiny-research" / "data" / "market_data"
-DATA_ROOT = Path.home() / "repo" / "destiny-research" / "data"
+# ─── Data paths ───
+DATA_ROOT           = "media" / "julien" / "HDD" / "data"
+DATA_RAW            = "media" / "julien" / "HDD" / "data" / "raw"
+DATA_NORMALIZED     = "media" / "julien" / "HDD" / "data" / "normalized"
+DATA_RECONSTRUCTED  = "media" / "julien" / "HDD" / "data" / "reconstructed"
 
-# Chemins dérivés
-RAW_HKEX        = DATA_ROOT / "raw_market_data" / "HSI"
-RAW_DATABENTO   = DATA_ROOT / "raw_market_data"
-RAW_ROOT        = DATA_ROOT / "raw_market_data"
-CLEAN_ROOT      = DATA_ROOT / "clean"
-LOB1_ROOT       = DATA_ROOT / "lob1"
+# ─── EVERYTHING BELOW THIS LINE MUST BE RECONSIDERED ───
 
 # Instruments HKEX qui nous intéressent
 # Source : OMD-D spec section 8.2 — List of Instrument Code
