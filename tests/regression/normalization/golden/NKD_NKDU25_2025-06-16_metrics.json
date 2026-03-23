@@ -1,0 +1,28 @@
+{
+  "product": "NKD",
+  "contract": "NKDU25",
+  "date": "2025-06-16",
+  "pipeline_version": "normalization_v1",
+  "row_count": 202829,
+  "action_distribution": {
+    "ADD": 90455,
+    "CANCEL": 89931,
+    "CLEAR": 1,
+    "FILL": 2459,
+    "MODIFY": 17912,
+    "TRADE": 2071
+  },
+  "side_distribution": {
+    "ASK": 102574,
+    "BID": 99949,
+    "NONE": 306
+  },
+  "price_min": 30500000000000,
+  "price_max": 42000000000000,
+  "ts_event_min": 1749989961330714909,
+  "ts_event_max": 1750118399914480413,
+  "sample_checksum_sha256": "44a6070ff83e0d0047d77d0b266e4e8c20438e751b63f71c5de9d24c69c7e095",
+  "sample_rows_used": 50000,
+  "rejected_count": 0,
+  "warmup_skip_count": 0
+}

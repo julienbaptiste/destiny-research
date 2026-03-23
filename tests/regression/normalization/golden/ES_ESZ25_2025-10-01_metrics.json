@@ -1,0 +1,28 @@
+{
+  "product": "ES",
+  "contract": "ESZ25",
+  "date": "2025-10-01",
+  "pipeline_version": "normalization_v1",
+  "row_count": 9964579,
+  "action_distribution": {
+    "ADD": 3983451,
+    "CANCEL": 3974268,
+    "CLEAR": 1,
+    "FILL": 888687,
+    "MODIFY": 754897,
+    "TRADE": 363275
+  },
+  "side_distribution": {
+    "ASK": 4981054,
+    "BID": 4983497,
+    "NONE": 28
+  },
+  "price_min": 1000000000000,
+  "price_max": 676500000000000,
+  "ts_event_min": 1759060805563128611,
+  "ts_event_max": 1759363199811881197,
+  "sample_checksum_sha256": "2753e5449bcdca2c81a392b84f8e1f8ab6a3e571184500c03d5a270b8efc7abf",
+  "sample_rows_used": 50000,
+  "rejected_count": 0,
+  "warmup_skip_count": 0
+}
