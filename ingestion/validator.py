@@ -331,17 +331,21 @@ def _validate_semantic(event: dict, state: ValidatorState) -> str | None:
         # Side mismatch on cancel — strong indicator of feed corruption
         if existing.side != side:
             return RejectReason.SIDE_MISMATCH
-        # Size check: the cancel will be applied by the reconstruction engine.
-        # We do NOT track remaining size in the shadow state — too expensive.
-        # If size goes to 0, the engine removes the order; we mirror that here.
-        # For partial cancels we leave the order in shadow state.
-        # NOTE: size=0 cancels (full cancel) will remove the order downstream.
-        # We remove it from shadow state optimistically — if the engine sees
-        # a different remaining size, it will handle it.
-        size = event.get("size", 0)
-        if size == 0:
-            # Full cancel implied (size field = cancelled qty, remaining = 0)
-            state.remove_order(order_id)
+        # Always remove from shadow state on any CANCEL.
+        #
+        # Databento CANCEL semantics: the size field = quantity being cancelled,
+        # NOT the remaining quantity. A partial cancel (e.g. cancel 3 of 5)
+        # has size=3, not size=2. We do not track remaining size in the shadow
+        # state — too expensive and not needed for validation purposes.
+        #
+        # Consequence: we optimistically remove the order on any CANCEL.
+        # This means a subsequent ADD with the same order_id (which CME allows
+        # after a full cancel — the exchange reuses order_ids) will be accepted
+        # correctly instead of triggering a false DUPLICATE_ADD.
+        #
+        # The reconstruction engine tracks actual remaining size and will handle
+        # partial vs full cancels correctly.
+        state.remove_order(order_id)
         return None
 
     # --- MODIFY ---
