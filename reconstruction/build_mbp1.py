@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from collections import defaultdict
@@ -898,10 +899,13 @@ def _iter_mbo_files(
     if not norm_dir.exists():
         return
     for p in sorted(norm_dir.glob(f"{contract}_*_mbo.parquet")):
-        # Extract date from filename: <CONTRACT>_<YYYYMMDD>_mbo.parquet
-        stem_parts = p.stem.split("_")
-        if len(stem_parts) >= 2:
-            date_str = stem_parts[1]  # YYYYMMDD
+    # Extract date as the first 8-digit numeric segment in the filename stem.
+    # Works for both outrights (ESZ25_20251001_mbo) and
+    # calendar spreads (ES_CAL_H26H27_20251001_mbo).
+    # REMINDER: WATCH OUT FOR POTENTIAL NEW PRODUCTS (SHOULD WE REWRITE THIS PART?)
+        match = re.search(r"(\d{8})", p.stem)
+        if match:
+            date_str = match.group(1)
             yield p, date_str
 
 
