@@ -23,6 +23,6 @@
   "ts_event_max": 1746216206813923692,
   "sample_checksum_sha256": "d57bcc511be90911f7da499d7ff75854a265145bc76db42777651025a00b0d4f",
   "sample_rows_used": 50000,
-  "rejected_count": 962,
+  "rejected_count": 0,
   "warmup_skip_count": 0
 }
