@@ -39,7 +39,7 @@ from typing import Iterator
 
 import pyarrow as pa
 
-from schema import ValidationMode
+from ingestion.schema import ValidationMode
 
 
 # ---------------------------------------------------------------------------

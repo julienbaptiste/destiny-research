@@ -59,7 +59,7 @@ from schema import (
     normalized_path,
     rejected_path,
 )
-from validator import ValidatorState, validate_event, print_stats
+from ingestion.validator import ValidatorState, validate_event, print_stats
 
 
 # ---------------------------------------------------------------------------

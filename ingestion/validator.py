@@ -39,7 +39,7 @@ from typing import Final
 
 import pyarrow as pa
 
-from schema import (
+from ingestion.schema import (
     Action,
     Flags,
     Side,
