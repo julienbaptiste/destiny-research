@@ -49,8 +49,8 @@ from typing import Iterator
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from adapters.base import BaseAdapter, ContractInfo, SessionConfig
-from schema import (
+from .adapters.base import BaseAdapter, ContractInfo, SessionConfig
+from .schema import (
     Action,
     Flags,
     ValidationMode,
@@ -59,7 +59,7 @@ from schema import (
     normalized_path,
     rejected_path,
 )
-from ingestion.validator import ValidatorState, validate_event, print_stats
+from .validator import ValidatorState, validate_event, print_stats
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +587,7 @@ _DEFAULT_DATA_ROOT = Path("/media/julien/HDD/data")
 
 def _get_adapter(provider: str):
     """Return the correct adapter instance for a given provider string."""
-    from adapters.databento_adapter import DatabentoAdapter
+    from .adapters.databento_adapter import DatabentoAdapter
     adapters = {
         "databento": DatabentoAdapter,
         # "hkex": HKEXAdapter,   ← add here as new providers are implemented

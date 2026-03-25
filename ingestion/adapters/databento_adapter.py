@@ -67,7 +67,7 @@ from typing import Iterator
 import databento as db
 
 from .base import BaseAdapter, ContractInfo, SessionConfig
-from ingestion.schema import (
+from ..schema import (
     Action,
     Flags,
     Side,
