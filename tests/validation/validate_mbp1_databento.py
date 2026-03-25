@@ -116,9 +116,10 @@ import duckdb
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from config import DATA_RAW, DATA_RECONSTRUCTED     # noqa: E402
-from ingestion.market_config import MARKET_CONFIG   # noqa: E402
-from ingestion.schema import reconstructed_path     # noqa: E402
+from config import DATA_RAW, DATA_RECONSTRUCTED                 # noqa: E402
+from ingestion.adapters.databento_adapter import _parse_symbol  # noqa: E402
+from ingestion.market_config import MARKET_CONFIG               # noqa: E402
+from ingestion.schema import reconstructed_path                 # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -291,18 +292,11 @@ def _stream_ref_to_parquet(
     imap         = db.common.symbology.InstrumentMap()
     imap.insert_metadata(store.metadata)
 
-    # Build the set of short-form candidate symbols for our contract.
-    # ESZ25 → {"ESZ5", "ESZ25"}  (try both — be defensive about SDK versions)
-    candidates: set[str] = set()
-    if len(contract) >= 3:
-        year_2d = contract[-2:]    # "25"
-        month_c = contract[-3]     # "Z"
-        prefix  = contract[:-3]    # "ES"
-        candidates.add(f"{prefix}{month_c}{year_2d[-1]}")  # "ESZ5"
-        candidates.add(contract)                            # "ESZ25"
-
     # Cache: instrument_id → bool (True = matches our contract, False = skip)
-    # Populated lazily during iteration — avoids repeated InstrumentMap lookups.
+    # Populated lazily — avoids repeated InstrumentMap + _parse_symbol calls.
+    # Matching uses _parse_symbol() (same logic as databento_adapter.py) to
+    # handle all symbol formats: CME outrights ("ESZ5"), EUREX outrights
+    # ("FDAX SI 20250620 CS"), spreads, etc.
     _iid_match   : dict[int, bool]       = {}
     _iid_symbol  : dict[int, str | None] = {}
 
@@ -332,11 +326,19 @@ def _stream_ref_to_parquet(
 
             iid = record.instrument_id
 
-            # Lazy instrument resolution and filtering
+            # Lazy instrument resolution and filtering.
+            # _parse_symbol() returns (product, contract, is_spread) or None.
+            # We match on the normalized contract name — works for CME and EUREX.
             if iid not in _iid_match:
                 sym = imap.resolve(iid, session_date)
                 _iid_symbol[iid] = sym
-                _iid_match[iid]  = (sym in candidates) if sym else False
+                if sym:
+                    parsed = _parse_symbol(sym, session_date)
+                    _iid_match[iid] = (
+                        parsed is not None and parsed[1] == contract
+                    )
+                else:
+                    _iid_match[iid] = False
                 if _iid_match[iid] and ref_symbol is None:
                     ref_symbol = sym
                     log.info(
