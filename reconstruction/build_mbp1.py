@@ -600,7 +600,13 @@ def _book_cancel(
         # Fully cancelled — remove from book
         book.orders_by_id.pop(order_id)
         is_tob = bool(order.flags & 0x01)
-        level.remove_order(order, is_tob=is_tob)
+        level.size -= old_size      # ← utilise old_size, avant mutation
+        if not is_tob:
+            level.count -= 1
+        try:
+            level.orders.remove(order)
+        except ValueError:
+            pass
         if not level:
             book._remove_level(price, side)
     else:
