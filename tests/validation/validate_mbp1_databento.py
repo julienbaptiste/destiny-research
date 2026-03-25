@@ -232,15 +232,17 @@ def _our_mbp1_path(product: str, contract: str, date_str: str) -> Path:
     Mirrors build_mbp1.py _out_path convention exactly.
 
     Example:
-        data/reconstructed/venue=CME/product=ES/contract=ESZ25/
-            year=2025/month=10/ESZ25_20251001_mbp1.parquet
+        data/reconstructed/provider=databento/venue=CME/product=ES/
+            contract=ESZ25/year=2025/month=10/ESZ25_20251001_mbp1.parquet
     """
     cfg   = MARKET_CONFIG[product]
     venue = cfg["exchange"]
+    provider = cfg["provider"]
     year  = int(date_str[:4])
     month = int(date_str[4:6])
     return reconstructed_path(
         base_dir = DATA_RECONSTRUCTED,
+         provider = provider,
         venue    = venue,
         product  = product,
         contract = contract,

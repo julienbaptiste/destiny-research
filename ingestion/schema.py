@@ -309,6 +309,7 @@ def normalized_path(
 
 def reconstructed_path(
     base_dir:  Path,
+    provider:  str,
     venue:     str,
     product:   str,
     contract:  str,
@@ -325,11 +326,12 @@ def reconstructed_path(
         reconstructed_path(..., venue="CME", product="ES",
                             contract="ESZ25", year=2025, month=10,
                             date_str="20251027", schema="mbp1")
-        →  base_dir/venue=CME/product=ES/contract=ESZ25/
-               year=2025/month=10/ESZ25_20251027_mbp1.parquet
+        →  base_dir/provider=databento/venue=CME/product=ES/
+               contract=ESZ25/year=2025/month=10/ESZ25_20251027_mbp1.parquet
     """
     return (
         base_dir
+        / f"provider={provider}"
         / f"venue={venue}"
         / f"product={product}"
         / f"contract={contract}"

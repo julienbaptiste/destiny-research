@@ -913,8 +913,10 @@ def _out_path(product: str, contract: str, year: int, month: int, date_str: str)
     """Return the output path for a reconstructed MBP-1 Parquet file."""
     cfg   = MARKET_CONFIG[product]
     venue = cfg["exchange"]
+    provider = cfg["provider"]
     return reconstructed_path(
         base_dir  = DATA_RECONSTRUCTED,
+        provider  = provider,
         venue     = venue,
         product   = product,
         contract  = contract,
