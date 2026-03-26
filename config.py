@@ -55,6 +55,7 @@ INSTRUMENT_MAP     = DATA_METADATA / "instrument_map.parquet"
 TESTS_ROOT         = REPO_ROOT / "tests"
 REGRESSION_ROOT    = TESTS_ROOT / "regression"
 GOLDEN_DIR_NORM    = REGRESSION_ROOT / "normalization" / "golden"
+GOLDEN_DIR_RECON   = REGRESSION_ROOT / "reconstruction" / "golden"
 
 # ---------------------------------------------------------------------------
 # HKEX configuration
