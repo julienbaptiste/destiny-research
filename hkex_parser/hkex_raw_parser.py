@@ -81,18 +81,22 @@ The parser scans all channels and routes each message to the correct product
 file via the orderbook_id → (symbol, class_code) mapping built from the
 Series Definition channels (MC101/201/301/151).
 
-═══════════════════════════════════════════════════════════════════════════════
 CLI
 ═══════════════════════════════════════════════════════════════════════════════
 
-  python hkex_raw_parser.py --date 20260203 \\
-      --bin-dir /media/julien/HDD/data/raw/provider=hkex/binaries/year=2026/month=02/day=03 \\
-      --out-dir /media/julien/HDD/data/raw/provider=hkex \\
-      [--products HSI MHI HHI MCH]   # optional filter; default = all
+  # Single day
+  python hkex_raw_parser.py --date 2026-02-03 [--products HSI MHI HHI MCH]
+
+  # Full month (skip already processed days)
+  python hkex_raw_parser.py --month 2026-02 [--products HSI MHI HHI MCH]
+
+  # Full month, force overwrite
+  python hkex_raw_parser.py --month 2026-02 --overwrite
 
 Output:
-  <out-dir>/product=HSI/year=2026/month=02/hkex-hsi_20260203_orders.parquet
-  <out-dir>/product=HSI/year=2026/month=02/hkex-hsi_20260203_trades.parquet
+  data/raw/provider=HKEX/venue=HKEX/product=HSI/year=2026/month=02/
+      hkex-hsi_20260203_orders.parquet
+      hkex-hsi_20260203_trades.parquet
   ... (one pair per product that had activity that day)
 """
 
@@ -108,7 +112,7 @@ import pyarrow.parquet as pq
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config import DATA_RAW, hkex_bin_dir, HKEX_CHANNELS_SERIES_DEFS, HKEX_CHANNELS_ORDER_BOOK, HKEX_CHANNELS_BLOCK_TRADES
+from config import DATA_RAW, DATA_BINARIES, hkex_bin_dir, HKEX_CHANNELS_SERIES_DEFS, HKEX_CHANNELS_ORDER_BOOK, HKEX_CHANNELS_BLOCK_TRADES
 
 logger = logging.getLogger(__name__)
 
@@ -885,13 +889,23 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="HKEX FBD-NSOM Raw Parser — binary channels → raw Parquet"
     )
-    ap.add_argument(
-        "--date", required=True,
-        help="Trading date YYYY-MM-DD, e.g. 2026-02-03",
+    # Mutually exclusive: either --date or --month
+    date_group = ap.add_mutually_exclusive_group(required=True)
+    date_group.add_argument(
+        "--date",
+        help="Single trading date YYYY-MM-DD, e.g. 2026-02-03",
+    )
+    date_group.add_argument(
+        "--month",
+        help="Full month YYYY-MM, e.g. 2026-02 — processes all available days",
     )
     ap.add_argument(
         "--products", nargs="*", default=None,
         help="ClassCodes to extract, e.g. HSI MHI HHI MCH. Default: all",
+    )
+    ap.add_argument(
+        "--overwrite", action="store_true", default=False,
+        help="Overwrite existing raw Parquet files. Default: skip already processed days",
     )
     ap.add_argument(
         "--log-level", default="INFO",
@@ -905,28 +919,58 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    # Derive paths from config — no hardcoding in CLI
-    bin_dir = hkex_bin_dir(args.date)
     out_dir = DATA_RAW / "provider=HKEX" / "venue=HKEX"
-    date_str = args.date.replace("-", "")  # '2026-02-03' → '20260203'
-
-    if not bin_dir.exists():
-        logger.error("Binary directory not found: %s", bin_dir)
-        logger.error("Expected structure: binaries/provider=HKEX/product=OMDD/year=YYYY/month=MM/day=DD/")
-        sys.exit(1)
-
     filter_str = ", ".join(args.products) if args.products else "ALL"
-    logger.info("HKEX Raw Parser — date=%s  products=%s", args.date, filter_str)
-    logger.info("bin-dir : %s", bin_dir)
-    logger.info("out-dir : %s", out_dir)
 
-    parser = HKEXRawParser(filter_products=args.products)
-    parser.parse_daily(
-        bin_dir  = bin_dir,
-        date_str = date_str,
-        out_dir  = out_dir,
-    )
+    # Build list of (date_str YYYYMMDD, bin_dir) pairs to process
+    if args.date:
+        date_str = args.date.replace("-", "")
+        bin_dir = hkex_bin_dir(args.date)
+        dates = [(date_str, bin_dir)]
+    else:
+        # --month: scan the binary directory for all MC221 files of that month
+        # MC221 is the largest channel — if it exists, the day has data
+        year, month = args.month.split("-")
+        bin_dir = DATA_BINARIES / "provider=HKEX" / "product=OMDD" / f"year={year}" / f"month={month}"
+        if not bin_dir.exists():
+            logger.error("Binary directory not found: %s", bin_dir)
+            sys.exit(1)
+        # Discover available days from MC221_All_YYYYMMDD filenames
+        mc221_files = sorted(bin_dir.glob("MC221_All_????????"))
+        if not mc221_files:
+            logger.error("No MC221_All_YYYYMMDD files found in %s", bin_dir)
+            sys.exit(1)
+        dates = [(f.name[-8:], bin_dir) for f in mc221_files]
+        logger.info("Found %d trading day(s) in %s", len(dates), args.month)
 
+    logger.info("HKEX Raw Parser — products=%s  overwrite=%s", filter_str, args.overwrite)
+
+    skipped = 0
+    processed = 0
+
+    for date_str, bin_dir in dates:
+        if not bin_dir.exists():
+            logger.warning("SKIP %s — binary directory not found: %s", date_str, bin_dir)
+            continue
+
+        # Skip check: look for the sentinel file (HSI orders parquet if filtering,
+        # else check any product directory has files for this date)
+        if not args.overwrite:
+            # Build a representative expected output path to check existence
+            # Use first product in filter (or HSI as default sentinel)
+            sentinel_product = (args.products[0] if args.products else "HSI")
+            sentinel_orders, _ = _parquet_paths(out_dir, sentinel_product, date_str)
+            if sentinel_orders.exists():
+                logger.info("SKIP %s — already exists (use --overwrite to reprocess)", date_str)
+                skipped += 1
+                continue
+
+        logger.info("Processing %s ...", date_str)
+        parser = HKEXRawParser(filter_products=args.products)
+        parser.parse_daily(bin_dir=bin_dir, date_str=date_str, out_dir=out_dir)
+        processed += 1
+
+    logger.info("Done. processed=%d  skipped=%d", processed, skipped)
 
 if __name__ == "__main__":
     main()
