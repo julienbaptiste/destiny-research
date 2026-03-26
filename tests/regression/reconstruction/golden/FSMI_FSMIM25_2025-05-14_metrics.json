@@ -1,0 +1,30 @@
+{
+  "product": "FSMI",
+  "contract": "FSMIM25",
+  "date": "2025-05-14",
+  "pipeline_version": "reconstruction_v1",
+  "row_count": 457269,
+  "action_distribution": {
+    "ADD": 241423,
+    "CANCEL": 207723,
+    "CLEAR": 9,
+    "MODIFY": 8106,
+    "TRADE": 8
+  },
+  "side_distribution": {
+    "ASK": 223088,
+    "BID": 234164,
+    "NONE": 17
+  },
+  "orphan_cancel": 0,
+  "orphan_modify": 0,
+  "burst_rate": 0.0,
+  "bid_px_min": 12070.0,
+  "bid_px_max": 12164.0,
+  "ask_px_min": 12072.0,
+  "ask_px_max": 12166.0,
+  "ts_event_min": 1747180800000000000,
+  "ts_event_max": 1747257335558418836,
+  "sample_checksum_sha256": "f546afdd2d90e1b364952c40737137f8e0eee7da2360a29736deff154bf01bc6",
+  "sample_rows_used": 50000
+}

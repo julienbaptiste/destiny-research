@@ -1,0 +1,30 @@
+{
+  "product": "FESX",
+  "contract": "FESXM25",
+  "date": "2025-05-14",
+  "pipeline_version": "reconstruction_v1",
+  "row_count": 2337985,
+  "action_distribution": {
+    "ADD": 1248184,
+    "CANCEL": 1055335,
+    "CLEAR": 9,
+    "MODIFY": 34314,
+    "TRADE": 143
+  },
+  "side_distribution": {
+    "ASK": 1135907,
+    "BID": 1201926,
+    "NONE": 152
+  },
+  "orphan_cancel": 0,
+  "orphan_modify": 0,
+  "burst_rate": 0.0,
+  "bid_px_min": 5363.0,
+  "bid_px_max": 5411.0,
+  "ask_px_min": 5364.0,
+  "ask_px_max": 5412.0,
+  "ts_event_min": 1747180800000000000,
+  "ts_event_max": 1747257328068104553,
+  "sample_checksum_sha256": "78bbbfb1d43504c2888e1571df0a3f3cb3b8439649a229cf9c26f2c4328a8da4",
+  "sample_rows_used": 50000
+}

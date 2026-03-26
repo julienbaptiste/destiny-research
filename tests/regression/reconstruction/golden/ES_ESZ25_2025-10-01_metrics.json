@@ -1,0 +1,27 @@
+{
+  "product": "ES",
+  "contract": "ESZ25",
+  "date": "2025-10-01",
+  "pipeline_version": "reconstruction_v1",
+  "row_count": 8135395,
+  "action_distribution": {
+    "ADD": 3969072,
+    "CANCEL": 3413125,
+    "MODIFY": 753198
+  },
+  "side_distribution": {
+    "ASK": 4091982,
+    "BID": 4043413
+  },
+  "orphan_cancel": 0,
+  "orphan_modify": 0,
+  "burst_rate": 0.089671,
+  "bid_px_min": 6680.0,
+  "bid_px_max": 6778.0,
+  "ask_px_min": 6680.25,
+  "ask_px_max": 6769.5,
+  "ts_event_min": 1759276800000030695,
+  "ts_event_max": 1759363199811881197,
+  "sample_checksum_sha256": "8c3d70bc5dfccb5e727f40074e1927ce9db83896562a16d4bfc1bbfa82fc9aa8",
+  "sample_rows_used": 50000
+}

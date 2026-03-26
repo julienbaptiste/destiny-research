@@ -1,0 +1,28 @@
+{
+  "product": "NIY",
+  "contract": "NIYU25",
+  "date": "2025-06-16",
+  "pipeline_version": "reconstruction_v1",
+  "row_count": 473991,
+  "action_distribution": {
+    "ADD": 221952,
+    "CANCEL": 215604,
+    "MODIFY": 36402,
+    "TRADE": 33
+  },
+  "side_distribution": {
+    "ASK": 240703,
+    "BID": 233288
+  },
+  "orphan_cancel": 0,
+  "orphan_modify": 0,
+  "burst_rate": 0.034511,
+  "bid_px_min": 38020.0,
+  "bid_px_max": 38615.0,
+  "ask_px_min": 38030.0,
+  "ask_px_max": 38705.0,
+  "ts_event_min": 1750032000008003369,
+  "ts_event_max": 1750118399904193501,
+  "sample_checksum_sha256": "ddbe98ca53dc2d5128498b323305289bb014eac326d905bd7b172b1b5d88cec0",
+  "sample_rows_used": 50000
+}

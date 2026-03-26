@@ -1,0 +1,30 @@
+{
+  "product": "FDAX",
+  "contract": "FDAXM25",
+  "date": "2025-05-14",
+  "pipeline_version": "reconstruction_v1",
+  "row_count": 2230245,
+  "action_distribution": {
+    "ADD": 1133952,
+    "CANCEL": 1091800,
+    "CLEAR": 9,
+    "MODIFY": 4460,
+    "TRADE": 24
+  },
+  "side_distribution": {
+    "ASK": 1076295,
+    "BID": 1153917,
+    "NONE": 33
+  },
+  "orphan_cancel": 0,
+  "orphan_modify": 0,
+  "burst_rate": 0.0,
+  "bid_px_min": 23517.0,
+  "bid_px_max": 23785.0,
+  "ask_px_min": 23520.0,
+  "ask_px_max": 23787.0,
+  "ts_event_min": 1747180800000000000,
+  "ts_event_max": 1747257354617055309,
+  "sample_checksum_sha256": "7cdbf93c0334f93b25fb4e1629a70f20d6a154476cf1917934765d86ed31ab6f",
+  "sample_rows_used": 50000
+}
