@@ -51,6 +51,18 @@ Usage:
     # All contracts for a product/month (auto-discovers contracts from normalized dir)
     python reconstruction/build_mbp1.py --product ES --month 2025-10 --all-contracts
 
+    # Full year, single contract
+    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --year 2025
+
+    # Full year, all contracts (auto-discovers contracts per month)
+    python reconstruction/build_mbp1.py --product ES --year 2025 --all-contracts
+
+    # All available data, all contracts
+    python reconstruction/build_mbp1.py --product ES --all-data
+
+    # All available data, specific contract filter
+    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --all-data
+
     # Overwrite existing outputs
     python reconstruction/build_mbp1.py --product ES --month 2025-10 --overwrite
 """
@@ -211,7 +223,7 @@ class Book:
                  "_n_orphan_modify")
 
     def __init__(self) -> None:
-        self.orders_by_id   : dict[int, _Order]            = {}
+        self.orders_by_id   : dict[int, _Order]             = {}
         self.offers         : SortedDict[int, _LevelOrders] = SortedDict()
         self.bids           : SortedDict[int, _LevelOrders] = SortedDict()
         # Counters for GTC orphan events (EUREX cross-session orders)
@@ -235,194 +247,6 @@ class Book:
             lo = self.offers.peekitem(0)[1]
             return _PriceLevel(price=lo.price, size=lo.size, count=lo.count)
         return None
-
-    # ------------------------------------------------------------------
-    # Event application
-    # ------------------------------------------------------------------
-
-    def apply(self, event: dict) -> bool:
-        """
-        Apply one normalized MBO event to the book state.
-
-        Returns True if the book state changed (TOB may have been affected),
-        False if the event was ignored (TRADE, FILL, NONE).
-
-        F_SNAPSHOT events must be applied (they seed the book) but the caller
-        is responsible for suppressing output rows for warmup events.
-
-        Args:
-            event: normalized event dict from NORMALIZED_MBO_SCHEMA.
-
-        Returns:
-            True if book state was modified, False otherwise.
-        """
-        action = event["action"]
-        side   = event["side"]
-        flags  = event["flags"]
-
-        # TRADE, FILL, NONE — no book state change
-        if action in (Action.TRADE, Action.FILL, Action.NONE):
-            return False
-
-        # CLEAR — wipe the entire book
-        if action == Action.CLEAR:
-            self._clear()
-            return True
-
-        # F_TOB with UNDEF_PRICE — clear one side entirely
-        if (flags & Flags.F_TOB) and event["price"] == UNDEF_PRICE:
-            self._side_levels(side).clear()
-            return True
-
-        # Standard order-level actions require a valid side
-        if side not in (Side.BID, Side.ASK):
-            return False
-
-        if action == Action.ADD:
-            self._add(event)
-        elif action == Action.CANCEL:
-            self._cancel(event)
-        elif action == Action.MODIFY:
-            self._modify(event)
-        else:
-            return False
-
-        return True
-
-    # ------------------------------------------------------------------
-    # Internal mutators
-    # ------------------------------------------------------------------
-
-    def _clear(self) -> None:
-        """Hard reset — remove all resting orders from both sides."""
-        self.orders_by_id.clear()
-        self.offers.clear()
-        self.bids.clear()
-
-    def _add(self, event: dict) -> None:
-        """Insert a new order (or replace a book side for F_TOB)."""
-        price    = event["price"]
-        size     = event["size"]
-        side     = event["side"]
-        order_id = event["order_id"]
-        flags    = event["flags"]
-
-        order = _Order(
-            order_id=order_id,
-            price=price,
-            size=size,
-            side=side,
-            flags=flags,
-        )
-
-        if flags & Flags.F_TOB:
-            # F_TOB ADD: replace the entire side with a single synthetic level.
-            # order_id=0 on F_TOB messages — do NOT insert into orders_by_id.
-            levels = self._side_levels(side)
-            levels.clear()
-            levels[price] = _LevelOrders(price=price, orders=[order])
-        else:
-            # Normal ADD: insert order at the end of its price level queue.
-            level = self._get_or_insert_level(price, side)
-            # Duplicate order_id guard — should not happen on clean data
-            if order_id in self.orders_by_id:
-                log.debug("Duplicate order_id=%d on ADD — overwriting", order_id)
-            self.orders_by_id[order_id] = order
-            level.orders.append(order)
-
-    def _cancel(self, event: dict) -> None:
-        """Partially or fully cancel a resting order."""
-        order_id = event["order_id"]
-        price    = event["price"]
-        side     = event["side"]
-        size     = event["size"]   # size being cancelled (delta)
-
-        if order_id not in self.orders_by_id:
-            # GTC orphan: ADD was in the previous day's file — skip silently
-            self._n_orphan_cancel += 1
-            return
-
-        order = self.orders_by_id[order_id]
-        level = self._get_level(price, side)
-        if level is None:
-            # Price level missing — data integrity issue, skip
-            log.debug("CANCEL: level not found price=%d side=%s", price, side)
-            return
-
-        # Reduce the order's remaining size
-        order.size = max(0, order.size - size)
-
-        if order.size == 0:
-            # Fully cancelled — remove from book
-            self.orders_by_id.pop(order_id)
-            try:
-                level.orders.remove(order)
-            except ValueError:
-                pass
-            # Remove the price level if it's now empty
-            if not level:
-                self._remove_level(price, side)
-
-    def _modify(self, event: dict) -> None:
-        """
-        Modify the price and/or size of a resting order.
-
-        Queue priority rules (standard exchange convention):
-          - Price change → loses priority (moved to end of new level's queue)
-          - Size increase → loses priority (moved to end of same level's queue)
-          - Size decrease → keeps priority (updated in place)
-
-        If order_id is not found (GTC cross-session orphan), treat as ADD.
-        """
-        order_id  = event["order_id"]
-        new_price = event["price"]
-        new_size  = event["size"]
-        side      = event["side"]
-        flags     = event["flags"]
-
-        if order_id not in self.orders_by_id:
-            # GTC orphan MODIFY: treat as ADD to seed the book state
-            self._n_orphan_modify += 1
-            self._add(event)
-            return
-
-        order = self.orders_by_id[order_id]
-        level = self._get_level(order.price, order.side)
-        if level is None:
-            log.debug("MODIFY: level not found price=%d side=%s", order.price, side)
-            self._add(event)
-            return
-
-        if order.price != new_price:
-            # Price change: remove from current level, insert at end of new level
-            try:
-                level.orders.remove(order)
-            except ValueError:
-                pass
-            if not level:
-                self._remove_level(order.price, side)
-            order.price = new_price
-            order.size  = new_size
-            order.flags = flags
-            new_level = self._get_or_insert_level(new_price, side)
-            new_level.orders.append(order)
-
-        elif new_size > order.size:
-            # Size increase: loses priority — move to end of same level
-            try:
-                level.orders.remove(order)
-            except ValueError:
-                pass
-            order.size  = new_size
-            order.flags = flags
-            level.orders.append(order)
-
-        else:
-            # Size decrease (or no change): update in place, keep priority
-            order.size  = new_size
-            order.flags = flags
-
-        self.orders_by_id[order_id] = order
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -453,6 +277,12 @@ class Book:
         levels = self._side_levels(side)
         levels.pop(price, None)
 
+    def _clear(self) -> None:
+        """Hard reset — remove all resting orders from both sides."""
+        self.orders_by_id.clear()
+        self.offers.clear()
+        self.bids.clear()
+
 
 # ---------------------------------------------------------------------------
 # Market — multi-instrument, multi-publisher container
@@ -474,14 +304,6 @@ class Market:
         self._books: defaultdict[int, defaultdict[int, Book]] = defaultdict(
             lambda: defaultdict(Book)
         )
-
-    def get_book(self, instrument_id: int, publisher_id: int) -> Book:
-        return self._books[instrument_id][publisher_id]
-
-    def apply(self, event: dict) -> bool:
-        """Apply event to the appropriate book. Returns True if state changed."""
-        book = self._books[event["instrument_id"]][event["publisher_id"]]
-        return book.apply(event)
 
     def best_bid(self, instrument_id: int, publisher_id: int) -> _PriceLevel | None:
         return self._books[instrument_id][publisher_id].best_bid()
@@ -527,8 +349,8 @@ def _apply_book(
         book._clear()
         return True
 
-    # F_TOB with UNDEF_PRICE — clear one side entirely
-    # Use int literals for bitmask ops — avoids enum.__and__ overhead
+    # F_TOB with UNDEF_PRICE — clear one side entirely.
+    # Use int literals for bitmask ops — avoids enum.__and__ overhead.
     if (flags & 0x01) and price == UNDEF_PRICE:
         book._side_levels(side).clear()
         return True
@@ -537,8 +359,6 @@ def _apply_book(
     if side != Side.BID and side != Side.ASK:
         return False
 
-    # Build a minimal _Order-compatible event for the book mutators.
-    # We pass individual fields to avoid dict allocation.
     if action == Action.ADD:
         _book_add(book, price, size, side, order_id, flags)
     elif action == Action.CANCEL:
@@ -589,6 +409,7 @@ def _book_cancel(
     if order_id not in book.orders_by_id:
         book._n_orphan_cancel += 1
         return
+
     order = book.orders_by_id[order_id]
     level = book._get_level(price, side)
     if level is None:
@@ -598,10 +419,12 @@ def _book_cancel(
     order.size = max(0, order.size - size)
 
     if order.size == 0:
-        # Fully cancelled — remove from book
+        # Fully cancelled — remove from book.
+        # Fix (25/03/2026): use old_size directly instead of going through
+        # remove_order(), which would read order.size after it was set to 0.
         book.orders_by_id.pop(order_id)
         is_tob = bool(order.flags & 0x01)
-        level.size -= old_size      # ← utilise old_size, avant mutation
+        level.size -= old_size
         if not is_tob:
             level.count -= 1
         try:
@@ -625,6 +448,7 @@ def _book_modify(
 ) -> None:
     """Modify price and/or size of a resting order."""
     if order_id not in book.orders_by_id:
+        # GTC orphan — treat as ADD (MODIFY fallback for cross-session orders)
         book._n_orphan_modify += 1
         _book_add(book, price, size, side, order_id, flags)
         return
@@ -657,7 +481,7 @@ def _book_modify(
 
     else:
         # Size decrease or no change: update in place, keep priority
-        old_size   = order.size
+        old_size    = order.size
         order.size  = size
         order.flags = flags
         level.update_size(old_size, size)
@@ -899,10 +723,10 @@ def _iter_mbo_files(
     if not norm_dir.exists():
         return
     for p in sorted(norm_dir.glob(f"{contract}_*_mbo.parquet")):
-    # Extract date as the first 8-digit numeric segment in the filename stem.
-    # Works for both outrights (ESZ25_20251001_mbo) and
-    # calendar spreads (ES_CAL_H26H27_20251001_mbo).
-    # REMINDER: WATCH OUT FOR POTENTIAL NEW PRODUCTS (SHOULD WE REWRITE THIS PART?)
+        # Extract date as the first 8-digit numeric segment in the filename stem.
+        # Works for both outrights (ESZ25_20251001_mbo) and
+        # calendar spreads (ES_CAL_H26H27_20251001_mbo).
+        # REMINDER: WATCH OUT FOR POTENTIAL NEW PRODUCTS (SHOULD WE REWRITE THIS PART?)
         match = re.search(r"(\d{8})", p.stem)
         if match:
             date_str = match.group(1)
@@ -911,8 +735,8 @@ def _iter_mbo_files(
 
 def _out_path(product: str, contract: str, year: int, month: int, date_str: str) -> Path:
     """Return the output path for a reconstructed MBP-1 Parquet file."""
-    cfg   = MARKET_CONFIG[product]
-    venue = cfg["exchange"]
+    cfg      = MARKET_CONFIG[product]
+    venue    = cfg["exchange"]
     provider = cfg["provider"]
     return reconstructed_path(
         base_dir  = DATA_RECONSTRUCTED,
@@ -925,6 +749,104 @@ def _out_path(product: str, contract: str, year: int, month: int, date_str: str)
         date_str  = date_str,
         schema    = "mbp1",
     )
+
+
+# ---------------------------------------------------------------------------
+# Discovery helpers (used by --year and --all-data modes)
+# ---------------------------------------------------------------------------
+
+def _discover_contracts(product: str, year: int, month: int) -> list[str]:
+    """
+    Auto-discover all contracts under DATA_NORMALIZED for a given product/year/month.
+
+    Scans contract=* directories directly under the product root — does not
+    filter by year/month at this level (contracts may span multiple months).
+    Returns a sorted list of contract symbols.
+    """
+    cfg      = MARKET_CONFIG[product]
+    venue    = cfg["exchange"]
+    provider = cfg["provider"]
+    base = (
+        DATA_NORMALIZED
+        / f"provider={provider}"
+        / f"venue={venue}"
+        / f"product={product}"
+    )
+    return sorted(
+        p.name.replace("contract=", "")
+        for p in base.glob("contract=*")
+        if p.is_dir()
+    )
+
+
+def _discover_year_months(product: str) -> list[tuple[int, int]]:
+    """
+    Walk DATA_NORMALIZED for the given product and return all (year, month)
+    pairs that actually contain data, sorted chronologically.
+
+    Scans the Hive-partitioned directory tree:
+        DATA_NORMALIZED/provider=.../venue=.../product={product}/
+            contract=.../year={Y}/month={M}/
+
+    Deduplicates across contracts — only unique (year, month) pairs returned.
+    """
+    cfg      = MARKET_CONFIG[product]
+    venue    = cfg["exchange"]
+    provider = cfg["provider"]
+    base = (
+        DATA_NORMALIZED
+        / f"provider={provider}"
+        / f"venue={venue}"
+        / f"product={product}"
+    )
+    year_months: set[tuple[int, int]] = set()
+    # Walk year=*/month=* under any contract partition
+    for ym_path in base.glob("contract=*/year=*/month=*"):
+        parts = {p.split("=")[0]: p.split("=")[1] for p in ym_path.parts if "=" in p}
+        try:
+            y = int(parts["year"])
+            m = int(parts["month"])
+            year_months.add((y, m))
+        except (KeyError, ValueError):
+            continue
+    return sorted(year_months)
+
+
+def _resolve_contracts(
+    args  : argparse.Namespace,
+    year  : int,
+    month : int,
+) -> list[str] | None:
+    """
+    Return the list of contracts to process for a given (year, month).
+
+    Resolution logic:
+      - --all-data always implies full auto-discovery (no need for --all-contracts).
+      - --all-contracts triggers auto-discovery for --month and --year modes.
+      - Otherwise, args.contract must be set (validated by the caller for --date).
+
+    Returns None on error (caller should propagate return 1).
+    """
+    # --all-data always does full discovery — no need to pass --all-contracts explicitly
+    use_discovery = args.all_contracts or args.all_data
+
+    if use_discovery:
+        contracts = _discover_contracts(args.product, year, month)
+        if not contracts:
+            log.error(
+                "No contracts found for product=%s year=%d month=%d.",
+                args.product, year, month,
+            )
+            return None
+        log.info("Discovered contracts for %d-%02d: %s", year, month, contracts)
+        return contracts
+    else:
+        if not args.contract:
+            log.error(
+                "--contract is required (or use --all-contracts / --all-data)."
+            )
+            return None
+        return [args.contract]
 
 
 # ---------------------------------------------------------------------------
@@ -943,22 +865,38 @@ def _parse_args() -> argparse.Namespace:
         "--contract", default=None,
         help=(
             "Contract symbol (e.g. ESZ25). "
-            "Required unless --all-contracts is set."
+            "Required for --date. Optional filter for --month/--year/--all-data."
         ),
     )
     parser.add_argument(
         "--date", default=None,
-        help="Single date YYYY-MM-DD. Mutually exclusive with --month.",
+        help="Single date YYYY-MM-DD. Mutually exclusive with --month/--year/--all-data.",
     )
     parser.add_argument(
         "--month", default=None,
-        help="Month YYYY-MM. Processes all available days for that month.",
+        help="Month YYYY-MM. Mutually exclusive with --date/--year/--all-data.",
+    )
+    parser.add_argument(
+        "--year", default=None,
+        help=(
+            "Full year YYYY. Processes all available months and contracts. "
+            "Mutually exclusive with --date/--month/--all-data."
+        ),
+    )
+    parser.add_argument(
+        "--all-data", action="store_true",
+        help=(
+            "Process ALL available data for the product (auto-discovers "
+            "years/months/contracts). "
+            "Mutually exclusive with --date/--month/--year."
+        ),
     )
     parser.add_argument(
         "--all-contracts", action="store_true",
         help=(
             "Auto-discover all contracts for this product/month from the "
-            "normalized directory. Requires --month."
+            "normalized directory. "
+            "Applies to --month and --year modes. Implicit for --all-data."
         ),
     )
     parser.add_argument(
@@ -975,15 +913,27 @@ def main() -> int:
         log.error("Unknown product '%s'. Add it to market_config.py.", args.product)
         return 1
 
-    # Build the work list: list of (product, contract, year, month, date_str)
-    work: list[tuple[str, str, int, int, str]] = []
-
-    if args.date and args.month:
-        log.error("--date and --month are mutually exclusive.")
+    # --- Mutual exclusion check across the four run modes ---
+    mode_flags = sum([
+        bool(args.date),
+        bool(args.month),
+        bool(args.year),
+        bool(args.all_data),
+    ])
+    if mode_flags > 1:
+        log.error("--date, --month, --year and --all-data are mutually exclusive.")
+        return 1
+    if mode_flags == 0:
+        log.error("Specify one of --date, --month, --year or --all-data.")
         return 1
 
+    # work list: (product, contract, year, month, date_str)
+    work: list[tuple[str, str, int, int, str]] = []
+
+    # ------------------------------------------------------------------
+    # MODE 1 — single day
+    # ------------------------------------------------------------------
     if args.date:
-        # Single day
         if not args.contract:
             log.error("--contract is required when --date is specified.")
             return 1
@@ -995,6 +945,9 @@ def main() -> int:
             return 1
         work.append((args.product, args.contract, d.year, d.month, d_str))
 
+    # ------------------------------------------------------------------
+    # MODE 2 — single month
+    # ------------------------------------------------------------------
     elif args.month:
         try:
             month_date = datetime.strptime(args.month, "%Y-%m")
@@ -1003,44 +956,73 @@ def main() -> int:
             log.error("Invalid month format '%s'. Expected YYYY-MM.", args.month)
             return 1
 
-        if args.all_contracts:
-            # Auto-discover contracts from the normalized directory
-            cfg      = MARKET_CONFIG[args.product]
-            venue    = cfg["exchange"]
-            provider = cfg["provider"]
-            base = (
-                DATA_NORMALIZED
-                / f"provider={provider}"
-                / f"venue={venue}"
-                / f"product={args.product}"
-            )
-            contracts = sorted(
-                p.name.replace("contract=", "")
-                for p in base.glob("contract=*")
-                if p.is_dir()
-            )
-            if not contracts:
-                log.error("No contracts found under %s", base)
-                return 1
-            log.info("Auto-discovered contracts: %s", contracts)
-        else:
-            if not args.contract:
-                log.error(
-                    "--contract is required for --month (or use --all-contracts)."
-                )
-                return 1
-            contracts = [args.contract]
+        contracts = _resolve_contracts(args, year, month)
+        if contracts is None:
+            return 1
 
         for contract in contracts:
-            for mbo_file, date_str in _iter_mbo_files(
-                args.product, contract, year, month
-            ):
+            for _, date_str in _iter_mbo_files(args.product, contract, year, month):
                 work.append((args.product, contract, year, month, date_str))
 
-    else:
-        log.error("Specify either --date or --month.")
-        return 1
+    # ------------------------------------------------------------------
+    # MODE 3 — full year (NEW)
+    # ------------------------------------------------------------------
+    elif args.year:
+        try:
+            year = int(args.year)
+            if not (2000 <= year <= 2100):
+                raise ValueError
+        except ValueError:
+            log.error("Invalid year '%s'. Expected YYYY.", args.year)
+            return 1
 
+        # Restrict the global discovery to the requested year
+        all_ym      = _discover_year_months(args.product)
+        year_months = [(y, m) for y, m in all_ym if y == year]
+
+        if not year_months:
+            log.warning("No data found for product=%s year=%d.", args.product, year)
+            return 0
+
+        log.info(
+            "Year %d — found %d month(s): %s",
+            year, len(year_months), year_months,
+        )
+
+        for y, m in year_months:
+            contracts = _resolve_contracts(args, y, m)
+            if contracts is None:
+                return 1
+            for contract in contracts:
+                for _, date_str in _iter_mbo_files(args.product, contract, y, m):
+                    work.append((args.product, contract, y, m, date_str))
+
+    # ------------------------------------------------------------------
+    # MODE 4 — all available data (NEW)
+    # ------------------------------------------------------------------
+    elif args.all_data:
+        all_ym = _discover_year_months(args.product)
+
+        if not all_ym:
+            log.warning("No data found for product=%s.", args.product)
+            return 0
+
+        log.info(
+            "all-data — found %d (year, month) pair(s): %s",
+            len(all_ym), all_ym,
+        )
+
+        for y, m in all_ym:
+            contracts = _resolve_contracts(args, y, m)
+            if contracts is None:
+                return 1
+            for contract in contracts:
+                for _, date_str in _iter_mbo_files(args.product, contract, y, m):
+                    work.append((args.product, contract, y, m, date_str))
+
+    # ------------------------------------------------------------------
+    # Execution loop
+    # ------------------------------------------------------------------
     if not work:
         log.warning("No files to process.")
         return 0
@@ -1050,7 +1032,7 @@ def main() -> int:
     n_ok = n_skip = n_fail = 0
 
     for product, contract, year, month, date_str in work:
-        out = _out_path(product, contract, year, month, date_str)
+        out      = _out_path(product, contract, year, month, date_str)
         norm_dir = _normalized_dir(product, contract, year, month)
         mbo_file = norm_dir / f"{contract}_{date_str}_mbo.parquet"
 
