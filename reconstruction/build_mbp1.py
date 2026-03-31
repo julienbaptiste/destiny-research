@@ -63,6 +63,9 @@ Usage:
     # All available data, specific contract filter
     python reconstruction/build_mbp1.py --product ES --contract ESZ25 --all-data
 
+    # Multiple products at once
+    python reconstruction/build_mbp1.py --product HSI HHI MHI MCH --all-data
+
     # Overwrite existing outputs
     python reconstruction/build_mbp1.py --product ES --month 2025-10 --overwrite
 """
@@ -726,7 +729,6 @@ def _iter_mbo_files(
         # Extract date as the first 8-digit numeric segment in the filename stem.
         # Works for both outrights (ESZ25_20251001_mbo) and
         # calendar spreads (ES_CAL_H26H27_20251001_mbo).
-        # REMINDER: WATCH OUT FOR POTENTIAL NEW PRODUCTS (SHOULD WE REWRITE THIS PART?)
         match = re.search(r"(\d{8})", p.stem)
         if match:
             date_str = match.group(1)
@@ -813,12 +815,13 @@ def _discover_year_months(product: str) -> list[tuple[int, int]]:
 
 
 def _resolve_contracts(
-    args  : argparse.Namespace,
-    year  : int,
-    month : int,
+    args    : argparse.Namespace,
+    product : str,
+    year    : int,
+    month   : int,
 ) -> list[str] | None:
     """
-    Return the list of contracts to process for a given (year, month).
+    Return the list of contracts to process for a given (product, year, month).
 
     Resolution logic:
       - --all-data always implies full auto-discovery (no need for --all-contracts).
@@ -826,19 +829,22 @@ def _resolve_contracts(
       - Otherwise, args.contract must be set (validated by the caller for --date).
 
     Returns None on error (caller should propagate return 1).
+
+    Note: product is passed explicitly (not taken from args.product) because
+    args.product is now a list and the caller iterates over it.
     """
     # --all-data always does full discovery — no need to pass --all-contracts explicitly
     use_discovery = args.all_contracts or args.all_data
 
     if use_discovery:
-        contracts = _discover_contracts(args.product, year, month)
+        contracts = _discover_contracts(product, year, month)
         if not contracts:
             log.error(
                 "No contracts found for product=%s year=%d month=%d.",
-                args.product, year, month,
+                product, year, month,
             )
             return None
-        log.info("Discovered contracts for %d-%02d: %s", year, month, contracts)
+        log.info("Discovered contracts for %s %d-%02d: %s", product, year, month, contracts)
         return contracts
     else:
         if not args.contract:
@@ -858,8 +864,8 @@ def _parse_args() -> argparse.Namespace:
         description="Reconstruct MBP-1 from normalized MBO Parquet files."
     )
     parser.add_argument(
-        "--product", required=True,
-        help="Product ticker (e.g. ES, FDAX, NIY).",
+        "--product", required=True, nargs="+",
+        help="Product ticker(s) (e.g. ES, or HSI HHI MHI MCH for multiple).",
     )
     parser.add_argument(
         "--contract", default=None,
@@ -909,11 +915,14 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
 
-    if args.product not in MARKET_CONFIG:
-        log.error("Unknown product '%s'. Add it to market_config.py.", args.product)
-        return 1
+    # Validate all products before starting any work
+    for product in args.product:
+        if product not in MARKET_CONFIG:
+            log.error("Unknown product '%s'. Add it to market_config.py.", product)
+            return 1
 
     # --- Mutual exclusion check across the four run modes ---
+    # Done once — applies identically to all products
     mode_flags = sum([
         bool(args.date),
         bool(args.month),
@@ -927,101 +936,103 @@ def main() -> int:
         log.error("Specify one of --date, --month, --year or --all-data.")
         return 1
 
+    # Build the full work list across all products
     # work list: (product, contract, year, month, date_str)
     work: list[tuple[str, str, int, int, str]] = []
 
-    # ------------------------------------------------------------------
-    # MODE 1 — single day
-    # ------------------------------------------------------------------
-    if args.date:
-        if not args.contract:
-            log.error("--contract is required when --date is specified.")
-            return 1
-        try:
-            d     = date.fromisoformat(args.date)
-            d_str = d.strftime("%Y%m%d")
-        except ValueError:
-            log.error("Invalid date format '%s'. Expected YYYY-MM-DD.", args.date)
-            return 1
-        work.append((args.product, args.contract, d.year, d.month, d_str))
+    for product in args.product:
 
-    # ------------------------------------------------------------------
-    # MODE 2 — single month
-    # ------------------------------------------------------------------
-    elif args.month:
-        try:
-            month_date = datetime.strptime(args.month, "%Y-%m")
-            year, month = month_date.year, month_date.month
-        except ValueError:
-            log.error("Invalid month format '%s'. Expected YYYY-MM.", args.month)
-            return 1
+        # ------------------------------------------------------------------
+        # MODE 1 — single day
+        # ------------------------------------------------------------------
+        if args.date:
+            if not args.contract:
+                log.error("--contract is required when --date is specified.")
+                return 1
+            try:
+                d     = date.fromisoformat(args.date)
+                d_str = d.strftime("%Y%m%d")
+            except ValueError:
+                log.error("Invalid date format '%s'. Expected YYYY-MM-DD.", args.date)
+                return 1
+            work.append((product, args.contract, d.year, d.month, d_str))
 
-        contracts = _resolve_contracts(args, year, month)
-        if contracts is None:
-            return 1
+        # ------------------------------------------------------------------
+        # MODE 2 — single month
+        # ------------------------------------------------------------------
+        elif args.month:
+            try:
+                month_date = datetime.strptime(args.month, "%Y-%m")
+                year, month = month_date.year, month_date.month
+            except ValueError:
+                log.error("Invalid month format '%s'. Expected YYYY-MM.", args.month)
+                return 1
 
-        for contract in contracts:
-            for _, date_str in _iter_mbo_files(args.product, contract, year, month):
-                work.append((args.product, contract, year, month, date_str))
-
-    # ------------------------------------------------------------------
-    # MODE 3 — full year (NEW)
-    # ------------------------------------------------------------------
-    elif args.year:
-        try:
-            year = int(args.year)
-            if not (2000 <= year <= 2100):
-                raise ValueError
-        except ValueError:
-            log.error("Invalid year '%s'. Expected YYYY.", args.year)
-            return 1
-
-        # Restrict the global discovery to the requested year
-        all_ym      = _discover_year_months(args.product)
-        year_months = [(y, m) for y, m in all_ym if y == year]
-
-        if not year_months:
-            log.warning("No data found for product=%s year=%d.", args.product, year)
-            return 0
-
-        log.info(
-            "Year %d — found %d month(s): %s",
-            year, len(year_months), year_months,
-        )
-
-        for y, m in year_months:
-            contracts = _resolve_contracts(args, y, m)
+            contracts = _resolve_contracts(args, product, year, month)
             if contracts is None:
                 return 1
+
             for contract in contracts:
-                for _, date_str in _iter_mbo_files(args.product, contract, y, m):
-                    work.append((args.product, contract, y, m, date_str))
+                for _, date_str in _iter_mbo_files(product, contract, year, month):
+                    work.append((product, contract, year, month, date_str))
 
-    # ------------------------------------------------------------------
-    # MODE 4 — all available data (NEW)
-    # ------------------------------------------------------------------
-    elif args.all_data:
-        all_ym = _discover_year_months(args.product)
-
-        if not all_ym:
-            log.warning("No data found for product=%s.", args.product)
-            return 0
-
-        log.info(
-            "all-data — found %d (year, month) pair(s): %s",
-            len(all_ym), all_ym,
-        )
-
-        for y, m in all_ym:
-            contracts = _resolve_contracts(args, y, m)
-            if contracts is None:
+        # ------------------------------------------------------------------
+        # MODE 3 — full year
+        # ------------------------------------------------------------------
+        elif args.year:
+            try:
+                year = int(args.year)
+                if not (2000 <= year <= 2100):
+                    raise ValueError
+            except ValueError:
+                log.error("Invalid year '%s'. Expected YYYY.", args.year)
                 return 1
-            for contract in contracts:
-                for _, date_str in _iter_mbo_files(args.product, contract, y, m):
-                    work.append((args.product, contract, y, m, date_str))
+
+            all_ym      = _discover_year_months(product)
+            year_months = [(y, m) for y, m in all_ym if y == year]
+
+            if not year_months:
+                log.warning("No data found for product=%s year=%d.", product, year)
+                continue
+
+            log.info(
+                "Year %d — product=%s — found %d month(s): %s",
+                year, product, len(year_months), year_months,
+            )
+
+            for y, m in year_months:
+                contracts = _resolve_contracts(args, product, y, m)
+                if contracts is None:
+                    return 1
+                for contract in contracts:
+                    for _, date_str in _iter_mbo_files(product, contract, y, m):
+                        work.append((product, contract, y, m, date_str))
+
+        # ------------------------------------------------------------------
+        # MODE 4 — all available data
+        # ------------------------------------------------------------------
+        elif args.all_data:
+            all_ym = _discover_year_months(product)
+
+            if not all_ym:
+                log.warning("No data found for product=%s.", product)
+                continue
+
+            log.info(
+                "all-data — product=%s — found %d (year, month) pair(s): %s",
+                product, len(all_ym), all_ym,
+            )
+
+            for y, m in all_ym:
+                contracts = _resolve_contracts(args, product, y, m)
+                if contracts is None:
+                    return 1
+                for contract in contracts:
+                    for _, date_str in _iter_mbo_files(product, contract, y, m):
+                        work.append((product, contract, y, m, date_str))
 
     # ------------------------------------------------------------------
-    # Execution loop
+    # Execution loop — processes all products sequentially
     # ------------------------------------------------------------------
     if not work:
         log.warning("No files to process.")

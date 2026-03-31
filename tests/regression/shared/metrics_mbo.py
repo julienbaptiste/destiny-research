@@ -111,10 +111,10 @@ _PRODUCT_VENUE: dict[str, tuple[str, str]] = {
     "FESX": ("EUREX", "databento"),
     "FSMI": ("EUREX", "databento"),
     # HKEX products — add once hkex_adapter.py is implemented
-    # "HSI": ("HKEX", "hkex"),
-    # "MHI": ("HKEX", "hkex"),
-    # "HHI": ("HKEX", "hkex"),
-    # "MCH": ("HKEX", "hkex"),
+    "HHI": ("HKEX", "HKEX"),
+    "HSI": ("HKEX", "HKEX"),
+    "MCH": ("HKEX", "HKEX"),
+    "MHI": ("HKEX", "HKEX"),
 }
 
 

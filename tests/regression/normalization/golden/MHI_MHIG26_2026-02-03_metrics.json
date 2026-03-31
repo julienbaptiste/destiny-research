@@ -1,0 +1,26 @@
+{
+  "product": "MHI",
+  "contract": "MHIG26",
+  "date": "2026-02-03",
+  "pipeline_version": "normalization_v1",
+  "row_count": 6936308,
+  "action_distribution": {
+    "ADD": 3466893,
+    "CANCEL": 3366794,
+    "CLEAR": 4,
+    "TRADE": 102617
+  },
+  "side_distribution": {
+    "ASK": 3701538,
+    "BID": 3234261,
+    "NONE": 509
+  },
+  "price_min": 0,
+  "price_max": 29999000000000,
+  "ts_event_min": 1770066431753000000,
+  "ts_event_max": 1770145200032000000,
+  "sample_checksum_sha256": "c52d39df99059093033f945609e364cdc12e2dd4e5eb6f47a39f7d598ea4a50a",
+  "sample_rows_used": 50000,
+  "rejected_count": 0,
+  "warmup_skip_count": 0
+}

@@ -1,0 +1,29 @@
+{
+  "product": "HHI",
+  "contract": "HHIG26",
+  "date": "2026-02-03",
+  "pipeline_version": "reconstruction_v1",
+  "row_count": 3865558,
+  "action_distribution": {
+    "ADD": 1926691,
+    "CANCEL": 1852691,
+    "CLEAR": 4,
+    "TRADE": 86172
+  },
+  "side_distribution": {
+    "ASK": 1941743,
+    "BID": 1923734,
+    "NONE": 81
+  },
+  "orphan_cancel": 0,
+  "orphan_modify": 0,
+  "burst_rate": 0.0,
+  "bid_px_min": 9069.0,
+  "bid_px_max": 9190.0,
+  "ask_px_min": 8930.0,
+  "ask_px_max": 9176.0,
+  "ts_event_min": 1770066427858000000,
+  "ts_event_max": 1770146145545000000,
+  "sample_checksum_sha256": "f38055394c26a1790fa4f73022a7817ddb95fba46c8475078a40e599845c8257",
+  "sample_rows_used": 50000
+}

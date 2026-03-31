@@ -57,12 +57,19 @@ from shared.metrics_mbp1 import (               # noqa: E402
 
 GOLDEN_CONFIG: dict[str, tuple[str, str]] = {
     # product: (contract, date)
+    ######### CME   PRODUCTS #########
     "ES":   ("ESZ25",   "2025-10-01"),
+    "NIY":  ("NIYU25",  "2025-06-16"),
+    "NKD":  ("NKDU25",  "2025-06-16"),
+    ######### EUREX PRODUCTS #########
     "FDAX": ("FDAXM25", "2025-05-14"),
     "FESX": ("FESXM25", "2025-05-14"),
     "FSMI": ("FSMIM25", "2025-05-14"),
-    "NIY":  ("NIYU25",  "2025-06-16"),
-    "NKD":  ("NKDU25",  "2025-06-16"),
+    ######### HKEX  PRODUCTS #########
+    "HHI":  ("HHIG26",  "2026-02-03"),
+    "HSI":  ("HSIG26",  "2026-02-03"),
+    "MCH":  ("MCHG26",  "2026-02-03"),
+    "MHI":  ("MHIG26",  "2026-02-03"),
 }
 
 GOLDEN_DIR = GOLDEN_DIR_RECON

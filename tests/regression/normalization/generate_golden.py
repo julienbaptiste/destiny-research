@@ -63,14 +63,24 @@ from shared.metrics_mbo import (  # noqa: E402
 # To add a product: append an entry with (contract, date).
 # Contract must match exactly the symbol in the normalized Parquet filename.
 
+# TO DO: MOVE THIS LIST IN A SEPARATE FILE SO IT CAN BE SHARED
+# WITH check_regression.py. IT WILL ALSO BE EASIER TO ADD A NEW
+# PRODUCT BY LISTING ALL THE STEPS TO DO IN THIS SEPARATE FILE
 GOLDEN_CONFIG: dict[str, tuple[str, str]] = {
     # product: (contract, date)
+    ######### CME   PRODUCTS #########
     "ES":   ("ESZ25",   "2025-10-01"),
+    "NIY":  ("NIYU25",  "2025-06-16"),
+    "NKD":  ("NKDU25",  "2025-06-16"),
+    ######### EUREX PRODUCTS #########
     "FDAX": ("FDAXM25", "2025-05-02"),
     "FESX": ("FESXM25", "2025-05-02"),
     "FSMI": ("FSMIM25", "2025-05-02"),
-    "NIY":  ("NIYU25",  "2025-06-16"),
-    "NKD":  ("NKDU25",  "2025-06-16"),
+    ######### HKEX  PRODUCTS #########
+    "HHI":  ("HHIG26",  "2026-02-03"),
+    "HSI":  ("HSIG26",  "2026-02-03"),
+    "MCH":  ("MCHG26",  "2026-02-03"),
+    "MHI":  ("MHIG26",  "2026-02-03"),
 }
 
 GOLDEN_DIR = GOLDEN_DIR_NORM
@@ -88,7 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate MBO normalization pipeline golden reference files."
     )
-    parser.add_argument(
+    parser.add_argument(    
         "--product", default=None,
         choices=list(GOLDEN_CONFIG.keys()),
         help="Restrict to a single product (default: all products).",

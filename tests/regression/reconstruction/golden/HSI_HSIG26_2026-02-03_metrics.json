@@ -1,0 +1,29 @@
+{
+  "product": "HSI",
+  "contract": "HSIG26",
+  "date": "2026-02-03",
+  "pipeline_version": "reconstruction_v1",
+  "row_count": 10071753,
+  "action_distribution": {
+    "ADD": 5033190,
+    "CANCEL": 4912753,
+    "CLEAR": 4,
+    "TRADE": 125806
+  },
+  "side_distribution": {
+    "ASK": 4188939,
+    "BID": 5882600,
+    "NONE": 214
+  },
+  "orphan_cancel": 0,
+  "orphan_modify": 0,
+  "burst_rate": 0.0,
+  "bid_px_min": 26861.0,
+  "bid_px_max": 27157.0,
+  "ask_px_min": 26460.0,
+  "ask_px_max": 27076.0,
+  "ts_event_min": 1770066427752000000,
+  "ts_event_max": 1770145200040000000,
+  "sample_checksum_sha256": "350114d4507e80eb49df020a2071519be9db7e234989d864f12583de18d5a20a",
+  "sample_rows_used": 50000
+}
