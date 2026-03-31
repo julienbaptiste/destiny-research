@@ -84,7 +84,7 @@ def _is_edt(d: date) -> bool:
 #   point_value       float — contract value per index point (in product currency)
 #   currency          str   — ISO 4217 currency code
 #   exchange          str   — exchange identifier (CME, EUREX, HKEX)
-#   provider          str   — data provider (databento, hkex)
+#   provider          str   — data provider (databento, HKEX)
 #   local_tz          str   — IANA timezone for display (not used for filtering)
 #   rth_mode          str   — 'us_eastern' | 'fixed_utc' | 'fixed_cet' | 'fixed_hkt'
 #
@@ -295,12 +295,12 @@ MARKET_CONFIG: dict[str, dict] = {
     "HSI": {
         # Hang Seng Index Future — HKEX
         # OTR ~580:1 (outlier — see CONTEXT.md §3 microstructure notes)
-        "tick_size_fp":         1_000_000_000,      # 1 pt * 1e9 — to confirm with hkex_adapter
+        "tick_size_fp":         1_000_000_000,      # 1 pt * 1e9 — confirmed (NumberOfDecimalsPrice=0, validated 2026-02-03)
         "price_floor_fp":       5_000_000_000_000,  # 5000 pt * 1e9
         "point_value":          50.0,               # HKD50 per index point
         "currency":             "HKD",
         "exchange":             "HKEX",
-        "provider":             "hkex",
+        "provider":             "HKEX",
         "local_tz":             "Asia/Hong_Kong",
         "description":          "Hang Seng Index Future (HKEX)",
         "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-Index/Hang-Seng-Index-Futures",
@@ -321,12 +321,12 @@ MARKET_CONFIG: dict[str, dict] = {
         # Mini Hang Seng Index Future — HKEX
         # Same underlying as HSI, contract size 1/5 (HKD10/pt vs HKD50/pt)
         # Higher retail participation expected — OTR and cancel_rate likely differ
-        "tick_size_fp":         1_000_000_000,      # 1 pt * 1e9 — to confirm
+        "tick_size_fp":         1_000_000_000,      # 1 pt * 1e9 — confirmed (NumberOfDecimalsPrice=0, validated 2026-02-03)
         "price_floor_fp":       5_000_000_000_000,
         "point_value":          10.0,               # HKD10 per index point
         "currency":             "HKD",
         "exchange":             "HKEX",
-        "provider":             "hkex",
+        "provider":             "HKEX",
         "local_tz":             "Asia/Hong_Kong",
         "description":          "Mini Hang Seng Index Future (HKEX)",
         "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-Index/Mini-Hang-Seng-Index-Futures",
@@ -344,12 +344,12 @@ MARKET_CONFIG: dict[str, dict] = {
         # H-shares China Enterprises Index Future — HKEX
         # Pure play China exposure via H-shares. Less liquid than HSI.
         # Fragmentation HHI/MCH likely more pronounced than HSI/MHI (see CONTEXT.md §3)
-        "tick_size_fp":         1_000_000_000,      # 1 pt * 1e9 — to confirm
+        "tick_size_fp":         1_000_000_000,      # 1 pt * 1e9 — confirmed (NumberOfDecimalsPrice=0, validated 2026-02-03)
         "price_floor_fp":       1_000_000_000_000,  # 1000 pt * 1e9
         "point_value":          50.0,               # HKD50 per index point
         "currency":             "HKD",
         "exchange":             "HKEX",
-        "provider":             "hkex",
+        "provider":             "HKEX",
         "local_tz":             "Asia/Hong_Kong",
         "description":          "H-shares China Enterprises Index Future (HKEX)",
         "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-China-Enterprises-Index/Hang-Seng-China-Enterprises-Index-Futures",
@@ -366,12 +366,12 @@ MARKET_CONFIG: dict[str, dict] = {
     "MCH": {
         # Mini H-shares China Enterprises Index Future — HKEX
         # Same underlying as HHI, contract size 1/5 (HKD10/pt vs HKD50/pt)
-        "tick_size_fp":         1_000_000_000,      # 1 pt * 1e9 — to confirm
+        "tick_size_fp":         1_000_000_000,      # 1 pt * 1e9 — confirmed (NumberOfDecimalsPrice=0, validated 2026-02-03)
         "price_floor_fp":       1_000_000_000_000,
         "point_value":          10.0,               # HKD10 per index point
         "currency":             "HKD",
         "exchange":             "HKEX",
-        "provider":             "hkex",
+        "provider":             "HKEX",
         "local_tz":             "Asia/Hong_Kong",
         "description":          "Mini H-shares China Enterprises Index Future (HKEX)",
         "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-China-Enterprises-Index/Mini-Hang-Seng-China-Enterprises-Index-Futures",

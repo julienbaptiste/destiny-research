@@ -588,9 +588,10 @@ _DEFAULT_DATA_ROOT = Path("/media/julien/HDD/data")
 def _get_adapter(provider: str):
     """Return the correct adapter instance for a given provider string."""
     from .adapters.databento_adapter import DatabentoAdapter
+    from .adapters.hkex_adapter import HKEXAdapter
     adapters = {
         "databento": DatabentoAdapter,
-        # "hkex": HKEXAdapter,   ← add here as new providers are implemented
+        "hkex": HKEXAdapter,
     }
     if provider not in adapters:
         print(f"ERROR: unknown provider '{provider}'. Available: {list(adapters)}")
@@ -704,6 +705,90 @@ def _cmd_batch(args) -> None:
         )
 
 
+def _cmd_hkex(args) -> None:
+    """HKEX ingestion — one product, one date or full month."""
+    from .adapters.hkex_adapter import HKEXAdapter
+
+    data_root      = _resolve_data_root(args)
+    normalized_dir = data_root / "normalized"
+
+    for product in args.product:
+        # Build list of dates to process
+        if args.date:
+            dates = [args.date]
+        else:
+            # Discover available days from raw parquet files for this product
+            year, month = args.month.split("-")
+            raw_month_dir = (data_root / "raw" / "provider=HKEX" / "venue=HKEX"
+                            / f"product={product}" / f"year={year}"
+                            / f"month={month}")
+            if not raw_month_dir.exists():
+                print(f"ERROR: raw directory not found: {raw_month_dir}")
+                sys.exit(1)
+            # Discover days from orders parquet filenames
+            orders_files = sorted(raw_month_dir.glob(
+                f"hkex-{product.lower()}_????????_orders.parquet"
+            ))
+            if not orders_files:
+                print(f"ERROR: no orders parquet found in {raw_month_dir}")
+                sys.exit(1)
+            # Extract dates from filenames: hkex-hsi_20260203_orders.parquet → 2026-02-03
+            dates = [
+                f"{f.name[len(product)+6:len(product)+10]}-"
+                f"{f.name[len(product)+10:len(product)+12]}-"
+                f"{f.name[len(product)+12:len(product)+14]}"
+                for f in orders_files
+            ]
+
+        print(f"[ingest] HKEX | product={product} | "
+            f"{len(dates)} day(s) | mode={args.mode}")
+
+        skipped = 0
+        for date_str in dates:
+            year, month, day = date_str.split("-")
+            raw_dir = (data_root / "raw" / "provider=HKEX" / "venue=HKEX"
+                    / f"product={product}" / f"year={year}"
+                    / f"month={month}")
+
+            if not raw_dir.exists():
+                print(f"  SKIP {date_str} — raw dir not found")
+                continue
+
+            # Skip check — use front month sentinel if known, else first contract
+            # We check for any normalized file for this date to detect already-processed days
+            norm_product_dir = (normalized_dir / "provider=HKEX" / "venue=HKEX"
+                                / f"product={product}")
+            existing = list(norm_product_dir.rglob(
+                f"*_{date_str.replace('-', '')}_mbo.parquet"
+            )) if norm_product_dir.exists() else []
+
+            if existing and not args.overwrite:
+                print(f"  SKIP {date_str} — already normalized "
+                    f"({len(existing)} contract(s)) "
+                    f"(use --overwrite to reprocess)")
+                skipped += 1
+                continue
+
+            session_date = date(int(year), int(month), int(day))
+            adapter      = HKEXAdapter()
+
+            counts = ingest_file(
+                adapter        = adapter,
+                raw_path       = raw_dir,
+                normalized_dir = normalized_dir,
+                session_date   = session_date,
+                mode           = args.mode,
+                verbose        = True,
+            )
+
+            print(f"  {date_str} → "
+                f"{sum(counts.values()):,} clean events "
+                f"across {len(counts)} contract(s)")
+
+        print(f"[ingest] Done. {len(dates) - skipped} processed, {skipped} skipped.")
+    print(f"[ingest] All done.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="ingest.py",
@@ -755,6 +840,21 @@ def main() -> None:
         help="Re-process files even if normalized output already exists",
     )
     p_batch.set_defaults(func=_cmd_batch)
+
+    # --- hkex subcommand ---
+    p_hkex = subparsers.add_parser("hkex", help="Ingest HKEX raw parquet for one product/date")
+    p_hkex.add_argument("--product", required=True, nargs="+",
+                        help="Product code(s), e.g. HSI MHI HHI MCH")
+    date_group = p_hkex.add_mutually_exclusive_group(required=True)
+    date_group.add_argument("--date",
+                        help="Single trading date YYYY-MM-DD, e.g. 2026-02-03")
+    date_group.add_argument("--month",
+                        help="Full month YYYY-MM, e.g. 2026-02 — processes all available days")
+    p_hkex.add_argument("--mode", choices=["STRICT", "LOOSE"], default="LOOSE",
+                        help="Validation mode (default: LOOSE)")
+    p_hkex.add_argument("--overwrite", action="store_true",
+                        help="Re-process even if normalized output already exists")
+    p_hkex.set_defaults(func=_cmd_hkex)
 
     args = parser.parse_args()
     args.func(args)
