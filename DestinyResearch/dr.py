@@ -384,6 +384,7 @@ def _front_by_volume(product: str, date_str: str, contracts: list[str]) -> str:
             / f"month={d.month:02d}"
             / f"{c}_{ds}_mbo.parquet"
         )
+        
         if path.exists():
             # Use single quotes inside the SQL — escape any apostrophes in path
             path_str = str(path).replace("'", "''")
@@ -403,7 +404,7 @@ def _front_by_volume(product: str, date_str: str, contracts: list[str]) -> str:
     sql = (
         f"SELECT contract, COUNT(*) AS n_trades "
         f"FROM ({union_sql}) "
-        f"WHERE action = 'T' "
+        f"WHERE action = 'TRADE' "
         f"GROUP BY contract "
         f"ORDER BY n_trades DESC "
         f"LIMIT 1"
@@ -459,7 +460,7 @@ def _front_by_expiry(contracts: list[str], date_str: str) -> str:
             year_4d += 10
         # Use day=1 as proxy — exact expiry day doesn't matter for ordering
         expiry = date(year_4d, month_num, 1)
-        if expiry >= date(ref.year, ref.month, 1):
+        if expiry >= date(ref.year, ref.month, ref.day):
             scored.append((expiry, c))
 
     if not scored:
@@ -811,15 +812,15 @@ def get_contract_stats(
     # DuckDB evaluates all aggregations in one sequential read.
     sql = f"""
         SELECT
-            COUNT(*)                                              AS n_rows,
-            COUNT(*) FILTER (WHERE action = 'ADD')               AS n_add,
-            COUNT(*) FILTER (WHERE action = 'CANCEL')            AS n_cancel,
-            COUNT(*) FILTER (WHERE action = 'MODIFY')            AS n_modify,
-            COUNT(*) FILTER (WHERE action = 'TRADE')             AS n_trade,
-            COUNT(*) FILTER (WHERE action = 'FILL')              AS n_fill,
-            COUNT(*) FILTER (WHERE action = 'CLEAR')             AS n_clear,
-            MIN(price) FILTER (WHERE price > 0)                  AS price_min,
-            MAX(price)                                           AS price_max
+            COUNT(*)                                                            AS n_rows,
+            COUNT(*) FILTER (WHERE action = 'ADD')                              AS n_add,
+            COUNT(*) FILTER (WHERE action = 'CANCEL')                           AS n_cancel,
+            COUNT(*) FILTER (WHERE action = 'MODIFY')                           AS n_modify,
+            COUNT(*) FILTER (WHERE action = 'TRADE')                            AS n_trade,
+            COUNT(*) FILTER (WHERE action = 'FILL')                             AS n_fill,
+            COUNT(*) FILTER (WHERE action = 'CLEAR')                            AS n_clear,
+            MIN(price) FILTER (WHERE action = 'TRADE')                          AS price_min,
+            MAX(price) FILTER (WHERE action = 'TRADE')                          AS price_max
         FROM read_parquet('{path_str}')
     """
     con = duckdb.connect()
