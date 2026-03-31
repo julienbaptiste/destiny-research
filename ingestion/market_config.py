@@ -303,7 +303,7 @@ MARKET_CONFIG: dict[str, dict] = {
         "provider":             "HKEX",
         "local_tz":             "Asia/Hong_Kong",
         "description":          "Hang Seng Index Future (HKEX)",
-        "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-Index/Hang-Seng-Index-Futures",
+        "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-Index-(HSI)/Hang-Seng-Index-Futures?sc_lang=en#&product=HSI",
         # Main daytime session (UTC = HKT - 8h)
         "session_open_utc":     "01:15:00",         # 09:15 HKT - 8h
         "session_close_utc":    "08:30:00",         # 16:30 HKT - 8h
@@ -329,7 +329,7 @@ MARKET_CONFIG: dict[str, dict] = {
         "provider":             "HKEX",
         "local_tz":             "Asia/Hong_Kong",
         "description":          "Mini Hang Seng Index Future (HKEX)",
-        "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-Index/Mini-Hang-Seng-Index-Futures",
+        "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-Index-(HSI)/Mini-Hang-Seng-Index-Futures?sc_lang=en",
         "session_open_utc":     "01:15:00",
         "session_close_utc":    "08:30:00",
         "lunch_break_start":    "04:00:00",
@@ -352,7 +352,7 @@ MARKET_CONFIG: dict[str, dict] = {
         "provider":             "HKEX",
         "local_tz":             "Asia/Hong_Kong",
         "description":          "H-shares China Enterprises Index Future (HKEX)",
-        "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-China-Enterprises-Index/Hang-Seng-China-Enterprises-Index-Futures",
+        "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-China-Enterprises-Index/Hang-Seng-China-Enterprises-Index-Futures?sc_lang=en#&product=HHI",
         "session_open_utc":     "01:15:00",
         "session_close_utc":    "08:30:00",
         "lunch_break_start":    "04:00:00",
@@ -374,7 +374,7 @@ MARKET_CONFIG: dict[str, dict] = {
         "provider":             "HKEX",
         "local_tz":             "Asia/Hong_Kong",
         "description":          "Mini H-shares China Enterprises Index Future (HKEX)",
-        "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-China-Enterprises-Index/Mini-Hang-Seng-China-Enterprises-Index-Futures",
+        "product_url":          "https://www.hkex.com.hk/Products/Listed-Derivatives/Equity-Index/Hang-Seng-China-Enterprises-Index/Mini-H-shares-Index-Futures?sc_lang=en#&product=MCH",
         "session_open_utc":     "01:15:00",
         "session_close_utc":    "08:30:00",
         "lunch_break_start":    "04:00:00",
