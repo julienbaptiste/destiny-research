@@ -1,0 +1,350 @@
+HOWTO.txt — Destiny Research: common workflows
+===============================================================================
+Quick reference for the ingestion, reconstruction, and regression pipelines.
+All commands are run from the repo root.
+Data root: /media/julien/HDD/data  (override: --data-root or $DESTINY_DATA_ROOT)
+===============================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 1 — ADDING A NEW PRODUCT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1 — Register in ingestion/market_config.py
+------------------------------------------------
+Add an entry to MARKET_CONFIG. Required keys for all products:
+
+    "NEWP": {
+        "tick_size_fp":         250_000_000,       # tick size × 1e9  (0.25 pt → 250_000_000)
+        "price_floor_fp":       500_000_000_000,   # min plausible price × 1e9 (sanity check)
+        "point_value":          50.0,              # contract value per point  ($50/pt for ES)
+        "currency":             "USD",             # ISO 4217
+        "exchange":             "CME",             # CME | EUREX | HKEX
+        "provider":             "databento",       # databento | HKEX
+        "local_tz":             "America/New_York",# IANA timezone (display only)
+        "description":          "...",
+        "product_url":          "https://...",
+
+        # Electronic session (UTC strings HH:MM:SS)
+        "session_open_utc":     "08:00:00",
+        "session_close_utc":    "22:00:00",
+
+        # RTH — choose one rth_mode:
+        #
+        #   "us_eastern"   → DST-aware (CME/ES, CME/NQ, …)
+        "rth_mode":             "us_eastern",
+        "rth_start_utc_edt":    "13:30:00",        # 09:30 ET in EDT (UTC-4)
+        "rth_end_utc_edt":      "20:00:00",
+        "rth_start_utc_est":    "14:30:00",        # 09:30 ET in EST (UTC-5)
+        "rth_end_utc_est":      "21:00:00",
+        #
+        #   "fixed_utc"    → JST/HKT products (NIY, NKD, HSI, MHI, HHI, MCH)
+        "rth_mode":             "fixed_utc",
+        "rth_start_utc":        "02:00:00",
+        "rth_end_utc":          "06:15:00",
+        #
+        #   "fixed_cet"    → Eurex products (FDAX, FESX, FSMI)
+        "rth_mode":             "fixed_cet",
+        "rth_start_cet":        "08:00:00",
+        "rth_end_cet":          "22:00:00",
+        #
+        #   "fixed_hkt"    → HKEX products
+        "rth_mode":             "fixed_hkt",
+        "rth_start_hkt":        "09:30:00",
+        "rth_end_hkt":          "16:00:00",
+
+        # CME only — daily maintenance window
+        "maintenance_start":    "21:00:00",
+        "maintenance_end":      "22:00:00",
+
+        # Optional
+        "needs_warmup":         False,             # True for NIY/NKD (Itayose effect)
+        "crossed_threshold":    10_000,            # alert if crossed books/day > N
+        "lunch_break_start":    "12:00:00",        # HKEX lunch break
+        "lunch_break_end":      "13:00:00",
+    }
+
+Note: AVAILABLE_PRODUCTS, PRODUCTS_CME, PRODUCTS_EUREX, PRODUCTS_HKEX are
+auto-derived from MARKET_CONFIG — no manual update needed.
+
+If you add a year not yet in _US_DST_TRANSITIONS (us_eastern products only):
+add the (spring_forward, fall_back) dates for that year in market_config.py.
+
+
+STEP 2 — Adapter
+-----------------
+  Databento products (CME/EUREX)  → no change, existing adapter handles it.
+  HKEX products                   → no change, hkex_adapter.py handles it.
+  New provider                    → implement BaseAdapter in ingestion/adapters/,
+                                    then register in ingestion/ingest.py _get_adapter().
+
+
+STEP 3 — Register in regression configs
+-----------------------------------------
+Add the new product to GOLDEN_CONFIG in all four files (same format):
+
+    # product: (contract, date)
+    "NEWP": ("NEWPZ25", "2025-10-01"),
+
+Files to update:
+    tests/regression/normalization/generate_golden.py   line ~69
+    tests/regression/normalization/check_regression.py  line ~57
+    tests/regression/reconstruction/generate_golden.py  line ~66
+    tests/regression/reconstruction/check_regression.py line ~57
+
+Pick a representative date: first trading day of the dataset, 0 rejected events
+preferred. Contract must match the exact symbol in the Parquet filename.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 2 — NORMALIZATION  (RAW → NORMALIZED MBO Parquet)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Output layout:
+    data/normalized/provider=databento/venue=CME/product=ES/contract=ESZ25/
+        year=2025/month=10/
+            ESZ25_20251001_mbo.parquet       ← clean events
+            ESZ25_20251001_rejected.parquet  ← validation failures (STRICT mode)
+
+Validation modes:
+    STRICT (default for Databento) — reject anomalies, write to rejected.parquet
+    LOOSE  (default for HKEX)      — flag anomalies with F_BAD_TS but keep them
+
+
+── CME / EUREX (Databento) ──────────────────────────────────────────────────
+
+  Single file (provider inferred from path):
+    python -m ingestion.ingest file /path/to/glbx-mdp3-20251027.mbo.dbn.zst
+    python -m ingestion.ingest file /path/to/glbx-mdp3-20251027.mbo.dbn.zst --mode LOOSE
+    python -m ingestion.ingest file /path/to/glbx-mdp3-20251027.mbo.dbn.zst --overwrite
+
+  Batch — one product:
+    python -m ingestion.ingest batch --provider databento --venue CME   --product ES
+    python -m ingestion.ingest batch --provider databento --venue EUREX --product FDAX
+
+  Batch — full venue (all products):
+    python -m ingestion.ingest batch --provider databento --venue CME
+    python -m ingestion.ingest batch --provider databento --venue EUREX
+
+  Batch — full provider (all venues/products):
+    python -m ingestion.ingest batch --provider databento
+
+  Common flags:
+    --mode STRICT|LOOSE    validation mode (default: STRICT)
+    --overwrite            re-process even if output already exists
+    --data-root /path      override data root
+
+
+── HKEX ─────────────────────────────────────────────────────────────────────
+
+  Single date, single product:
+    python -m ingestion.ingest hkex --product HSI --date 2026-02-03
+
+  Multiple products, single date:
+    python -m ingestion.ingest hkex --product HSI MHI HHI MCH --date 2026-02-03
+
+  Full month (discovers all available days automatically):
+    python -m ingestion.ingest hkex --product HSI --month 2026-02
+    python -m ingestion.ingest hkex --product HSI MHI --month 2026-02
+
+  Common flags:
+    --mode STRICT|LOOSE    validation mode (default: LOOSE for HKEX)
+    --overwrite            re-process even if output already exists
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 3 — RECONSTRUCTION  (NORMALIZED MBO → MBP-1 Parquet)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Output layout:
+    data/reconstructed/provider=databento/venue=CME/product=ES/contract=ESZ25/
+        year=2025/month=10/
+            ESZ25_20251001_mbp1.parquet
+
+Output schema (mirrors Databento native MBP-1):
+    ts_event, ts_recv         uint64 nanoseconds UTC
+    action                    string (ADD/CANCEL/MODIFY/TRADE/FILL/CLEAR/NONE)
+    side                      string (BID/ASK/NONE)
+    price                     float64 (fixed-point / 1e9)
+    flags                     uint8
+    sequence                  uint32
+    bid_px_00, ask_px_00      float64  — top-of-book prices
+    bid_sz_00, ask_sz_00      uint32   — top-of-book sizes
+    bid_ct_00, ask_ct_00      uint32   — top-of-book order counts
+
+  Single day (--contract required):
+    python reconstruction/build_mbp1.py --product ES   --contract ESZ25   --date 2025-10-01
+    python reconstruction/build_mbp1.py --product FDAX --contract FDAXM25 --date 2025-05-02
+    python reconstruction/build_mbp1.py --product HSI  --contract HSIG26  --date 2026-02-03
+
+  Full month — one contract:
+    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --month 2025-10
+
+  Full month — all contracts (auto-discovery):
+    python reconstruction/build_mbp1.py --product ES   --month 2025-10 --all-contracts
+    python reconstruction/build_mbp1.py --product FDAX --month 2025-05 --all-contracts
+
+  Full year — one contract:
+    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --year 2025
+
+  Full year — all contracts (auto-discovery):
+    python reconstruction/build_mbp1.py --product ES --year 2025 --all-contracts
+
+  All available data — all contracts (full history):
+    python reconstruction/build_mbp1.py --product ES   --all-data
+    python reconstruction/build_mbp1.py --product FDAX --all-data
+
+  All available data — filtered to one contract:
+    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --all-data
+
+  Common flag:
+    --overwrite    overwrite existing output files (default: skip)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 4 — REGRESSION GOLDEN FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Run ONCE after a known-good pipeline state, then git commit the golden/ dir.
+Golden files capture exact metrics: row_count, rejected_count, price bounds,
+action/side distributions, and a SHA-256 checksum of a 50k-row sample.
+
+Golden file locations:
+    tests/regression/normalization/golden/
+        ES_ESZ25_20251001_normalization_v1.json
+    tests/regression/reconstruction/golden/
+        ES_ESZ25_20251001_reconstruction_v1.json
+
+
+── Normalization golden files ────────────────────────────────────────────────
+
+  All products (normalized outputs must exist on disk):
+    python tests/regression/normalization/generate_golden.py --skip-pipeline
+
+  Re-run ingestion first, then generate:
+    python tests/regression/normalization/generate_golden.py
+
+  Single product:
+    python tests/regression/normalization/generate_golden.py --product ES   --skip-pipeline
+    python tests/regression/normalization/generate_golden.py --product HSI  --skip-pipeline
+    python tests/regression/normalization/generate_golden.py --product FDAX --skip-pipeline
+
+  After generation:
+    git add tests/regression/normalization/golden/
+
+
+── Reconstruction golden files ───────────────────────────────────────────────
+
+  All products (reconstructed outputs must exist on disk):
+    python tests/regression/reconstruction/generate_golden.py --skip-pipeline
+
+  Re-run reconstruction first, then generate:
+    python tests/regression/reconstruction/generate_golden.py
+
+  Single product:
+    python tests/regression/reconstruction/generate_golden.py --product ES   --skip-pipeline
+    python tests/regression/reconstruction/generate_golden.py --product FDAX --skip-pipeline
+
+  After generation:
+    git add tests/regression/reconstruction/golden/
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 5 — REGRESSION TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Exit codes: 0 = all passed / 1 = regression detected / 2 = setup error
+
+
+── Run all suites (recommended post-commit) ──────────────────────────────────
+
+  Fast — compare outputs on disk (~30s):
+    python tests/run_all_checks.py --skip-pipeline
+
+  Deep — re-run both pipelines, then compare (~10 min):
+    python tests/run_all_checks.py
+
+  Verbose — print all metric comparisons, not just failures:
+    python tests/run_all_checks.py --skip-pipeline --verbose
+
+
+── Run one suite only ────────────────────────────────────────────────────────
+
+  python tests/run_all_checks.py --suite normalization   --skip-pipeline
+  python tests/run_all_checks.py --suite reconstruction  --skip-pipeline
+
+
+── Run a single product directly ─────────────────────────────────────────────
+
+  python tests/regression/normalization/check_regression.py  --product ES   --skip-pipeline
+  python tests/regression/normalization/check_regression.py  --product HSI  --skip-pipeline --verbose
+  python tests/regression/reconstruction/check_regression.py --product FDAX --skip-pipeline
+  python tests/regression/reconstruction/check_regression.py --product ES   --skip-pipeline --verbose
+
+
+── When to run which suite ───────────────────────────────────────────────────
+
+  Changed ingestion/                                   → --suite normalization
+  Changed reconstruction/build_mbp1.py                → --suite reconstruction
+  Changed ingestion/schema.py or market_config.py     → both suites
+  After adding a new product + generating golden files → both suites
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 6 — TYPICAL WORKFLOWS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── Add a new CME/EUREX product (e.g. NQ) ────────────────────────────────────
+
+  1. Add "NQ" to MARKET_CONFIG in ingestion/market_config.py
+  2. Add "NQ": ("NQZ25", "2025-10-01") to GOLDEN_CONFIG in all 4 regression files
+  3. Normalize:
+       python -m ingestion.ingest batch --provider databento --venue CME --product NQ
+  4. Reconstruct:
+       python reconstruction/build_mbp1.py --product NQ --all-data
+  5. Generate golden files:
+       python tests/regression/normalization/generate_golden.py   --product NQ --skip-pipeline
+       python tests/regression/reconstruction/generate_golden.py  --product NQ --skip-pipeline
+  6. Verify:
+       python tests/run_all_checks.py --skip-pipeline
+  7. Commit:
+       git add ingestion/market_config.py tests/regression/
+
+
+── Add a new HKEX product (e.g. DHS) ────────────────────────────────────────
+
+  1. Add "DHS" to MARKET_CONFIG in ingestion/market_config.py
+  2. Add "DHS": ("DHSG26", "2026-02-03") to GOLDEN_CONFIG in all 4 regression files
+  3. Normalize:
+       python -m ingestion.ingest hkex --product DHS --month 2026-02
+  4. Reconstruct:
+       python reconstruction/build_mbp1.py --product DHS --all-data
+  5. Generate golden files:
+       python tests/regression/normalization/generate_golden.py   --product DHS --skip-pipeline
+       python tests/regression/reconstruction/generate_golden.py  --product DHS --skip-pipeline
+  6. Verify:
+       python tests/run_all_checks.py --skip-pipeline
+  7. Commit.
+
+
+── Routine post-commit check ─────────────────────────────────────────────────
+
+  python tests/run_all_checks.py --skip-pipeline
+
+
+── Re-generate all golden files after an intentional pipeline change ─────────
+
+  # Bump PIPELINE_VERSION in generate_golden.py + check_regression.py first,
+  # then:
+  python -m ingestion.ingest batch --provider databento --overwrite
+  python -m ingestion.ingest hkex --product HSI MHI HHI MCH --month 2026-02 --overwrite
+  python reconstruction/build_mbp1.py --product ES   --all-data --overwrite
+  python reconstruction/build_mbp1.py --product FDAX --all-data --overwrite
+  # ... repeat for all products, then:
+  python tests/regression/normalization/generate_golden.py   --skip-pipeline
+  python tests/regression/reconstruction/generate_golden.py  --skip-pipeline
+  python tests/run_all_checks.py --skip-pipeline
+  git add tests/regression/
+
+
+===============================================================================
