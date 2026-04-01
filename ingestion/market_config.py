@@ -170,10 +170,14 @@ MARKET_CONFIG: dict[str, dict] = {
         "session_close_utc":    "21:00:00",
         "maintenance_start":    "21:00:00",
         "maintenance_end":      "22:00:00",
-        # RTH: 11:00–15:15 JST = 02:00–06:15 UTC (fixed, JST = UTC+9, no DST)
+        # RTH: 10:00–15:15 JST = 01:00–06:15 UTC (fixed, JST = UTC+9, no DST)
         "rth_mode":             "fixed_utc",
-        "rth_start_utc":        "02:00:00",         # 11:00 JST
-        "rth_end_utc":          "06:15:00",         # 15:15 JST
+        "sessions": {
+                                # Primary session: OSE Tokyo (used for Asia cross-market comparison)
+                                "asia": ("01:00:00", "06:15:00"),   # OSE Tokyo — default
+                                # Secondary session: CME US (primary liquidity per empirical observation)
+                                "us":   ("13:30:00", "20:00:00"),   # CME US session — must be DST-aware like ES
+        },
         # Reconstruction: warmup required (see rationale above)
         "needs_warmup":         True,
         "crossed_threshold":    150_000,            # alert if crossed books > 150K/day
@@ -201,10 +205,14 @@ MARKET_CONFIG: dict[str, dict] = {
         "session_close_utc":    "21:00:00",
         "maintenance_start":    "21:00:00",
         "maintenance_end":      "22:00:00",
-        # RTH: 11:00–15:15 JST = 02:00–06:15 UTC (same as NIY)
+        # RTH: 10:00–15:15 JST = 01:00–06:15 UTC (fixed, JST = UTC+9, no DST)
         "rth_mode":             "fixed_utc",
-        "rth_start_utc":        "02:00:00",
-        "rth_end_utc":          "06:15:00",
+        "sessions": {
+                                # Primary session: OSE Tokyo (used for Asia cross-market comparison)
+                                "asia": ("01:00:00", "06:15:00"),   # OSE Tokyo — default
+                                # Secondary session: CME US (primary liquidity per empirical observation)
+                                "us":   ("13:30:00", "20:00:00"),   # CME US session — must be DST-aware like ES
+        },
         # Reconstruction: warmup required (same Itayose rationale as NIY)
         "needs_warmup":         True,
         # NKD crossed books are structural — threshold set high to avoid noise alerts
@@ -419,24 +427,69 @@ def _cet_to_utc(time_str: str) -> str:
     return f"{h_utc:02d}:{m:02d}:{s:02d}"
 
 
-def rth_utc_bounds(d: date, cfg: dict) -> tuple[str, str]:
+def rth_utc_bounds(d: date, cfg: dict, session: str = "default") -> tuple[str, str]:
     """Return RTH start/end as UTC time strings for a given date and product config.
 
-    Dispatches on cfg['rth_mode']:
-      - 'us_eastern': DST-aware US/Eastern (ES). d is required for DST lookup.
-      - 'fixed_utc':  Fixed UTC bounds (NIY, NKD, HSI, MHI, HHI, MCH). d is ignored.
-      - 'fixed_cet':  Fixed CET bounds converted to UTC (FDAX, FESX, FSMI). d is ignored.
+    Two dispatch paths:
+
+    1. Multi-session products (cfg contains 'sessions' key):
+       Sessions are declared as a named dict in market_config.py:
+           "sessions": {
+               "asia": ("01:00:00", "06:15:00"),  # first entry = default
+               "us":   ("13:30:00", "20:00:00"),
+           }
+       session='default' resolves to the first declared session.
+       Raises ValueError if the requested session name is not found.
+       Currently: NIY, NKD.
+
+    2. Single-session products (no 'sessions' key) — dispatches on rth_mode:
+       - 'us_eastern': DST-aware US/Eastern (ES). d is required for DST lookup.
+       - 'fixed_utc':  Fixed UTC bounds (HSI, MHI, HHI, MCH). d is ignored.
+       - 'fixed_cet':  Fixed CET bounds converted to UTC (FDAX, FESX, FSMI). d is ignored.
 
     Args:
-        d:   target calendar date (used for DST lookup on us_eastern products).
-        cfg: product config dict from MARKET_CONFIG.
+        d:       Target calendar date. Required for DST lookup on 'us_eastern' products.
+                 Ignored for fixed-UTC and fixed-CET products.
+        cfg:     Product config dict from MARKET_CONFIG.
+        session: Named session to use for multi-session products (NIY, NKD).
+                 'default' resolves to the first declared session (asia).
+                 Ignored for single-session products.
 
     Returns:
-        (rth_start_utc, rth_end_utc) as 'HH:MM:SS' strings.
+        (rth_start_utc, rth_end_utc) as 'HH:MM:SS' UTC strings.
 
     Raises:
-        ValueError: unknown rth_mode, or missing DST year for us_eastern.
+        ValueError: unknown session name, unknown rth_mode, or missing DST year.
+
+    Examples:
+        # Single-session, DST-aware
+        rth_utc_bounds(date(2025, 10, 10), MARKET_CONFIG["ES"])
+        → ("13:30:00", "20:00:00")  # EDT
+
+        # Multi-session, default (asia)
+        rth_utc_bounds(date(2026, 2, 2), MARKET_CONFIG["NIY"])
+        → ("01:00:00", "06:15:00")
+
+        # Multi-session, explicit session
+        rth_utc_bounds(date(2026, 2, 2), MARKET_CONFIG["NIY"], session="us")
+        → ("13:30:00", "20:00:00")
     """
+    # ── Path 1: multi-session products ────────────────────────────────────────
+    if "sessions" in cfg:
+        sessions = cfg["sessions"]
+        if session == "default":
+            # First declared session is the default (dict insertion order, Python 3.7+)
+            key = next(iter(sessions))
+        elif session in sessions:
+            key = session
+        else:
+            raise ValueError(
+                f"Unknown session '{session}'. "
+                f"Available: {list(sessions.keys())}"
+            )
+        return sessions[key]
+
+    # ── Path 2: single-session products — dispatch on rth_mode ────────────────
     mode = cfg["rth_mode"]
 
     if mode == "us_eastern":
@@ -456,10 +509,9 @@ def rth_utc_bounds(d: date, cfg: dict) -> tuple[str, str]:
 
     else:
         raise ValueError(
-            f"Unknown rth_mode '{mode}' for product. "
+            f"Unknown rth_mode '{mode}'. "
             "Expected: 'us_eastern', 'fixed_utc', 'fixed_cet'."
         )
-
 
 # ── DuckDB query helpers ───────────────────────────────────────────────────────
 

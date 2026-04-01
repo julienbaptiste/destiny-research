@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Optional
 
 import duckdb
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -351,6 +352,45 @@ def get_front_contract(
         raise ValueError(f"Unknown method '{method}'. Use 'volume' or 'expiry'.")
 
 
+def futures_month_codes() -> "pd.DataFrame":
+    """
+    Return a reference table of CME/HKEX futures month letter codes.
+
+    Standard month codes used across all products in our universe
+    (CME, Eurex, HKEX all use the same convention).
+
+    Returns
+    -------
+    pandas.DataFrame with columns:
+        month_num  : int (1–12)
+        month_name : str (e.g. 'January')
+        code       : str (e.g. 'F')
+
+    Example
+    -------
+    >>> dr.futures_month_codes()
+    >>> # Find the code for March
+    >>> dr.futures_month_codes().query("month_name == 'March'")
+    >>> # Find which month 'U' corresponds to
+    >>> dr.futures_month_codes().query("code == 'U'")
+    """
+    import pandas as pd
+    return pd.DataFrame([
+        {"month_num": 1,  "month_name": "January",   "code": "F"},
+        {"month_num": 2,  "month_name": "February",  "code": "G"},
+        {"month_num": 3,  "month_name": "March",     "code": "H"},
+        {"month_num": 4,  "month_name": "April",     "code": "J"},
+        {"month_num": 5,  "month_name": "May",       "code": "K"},
+        {"month_num": 6,  "month_name": "June",      "code": "M"},
+        {"month_num": 7,  "month_name": "July",      "code": "N"},
+        {"month_num": 8,  "month_name": "August",    "code": "Q"},
+        {"month_num": 9,  "month_name": "September", "code": "U"},
+        {"month_num": 10, "month_name": "October",   "code": "V"},
+        {"month_num": 11, "month_name": "November",  "code": "X"},
+        {"month_num": 12, "month_name": "December",  "code": "Z"},
+    ])
+
+
 def _front_by_volume(product: str, date_str: str, contracts: list[str]) -> str:
     """
     Return the contract with the highest number of trades (action='T') on
@@ -517,35 +557,6 @@ def get_mbo(
     return pq.ParquetFile(path).read(columns=columns)
 
 
-def get_mbp1(
-    contract: str,
-    date_str: str,
-    columns: Optional[list[str]] = None,
-) -> pa.Table:
-    """
-    Load the reconstructed MBP-1 (top-of-book) snapshot stream for a specific
-    contract and date.
-
-    Parameters
-    ----------
-    contract : Contract symbol, e.g. 'ESZ25', 'HSIG26'.
-    date_str : Date in 'YYYY-MM-DD' or 'YYYYMMDD' format.
-    columns  : Optional list of column names to load. None = all columns.
-               Example: ['ts_recv', 'bid_px_00', 'ask_px_00', 'bid_sz_00', 'ask_sz_00']
-
-    Returns
-    -------
-    pyarrow.Table with the MBP-1 schema (one snapshot per F_LAST event).
-
-    Example
-    -------
-    >>> tbl = dr.get_mbp1("ESZ25", "2025-10-01")
-    >>> tbl = dr.get_mbp1("HSIG26", "2026-02-03", columns=["ts_recv", "bid_px_00", "ask_px_00"])
-    """
-    path = _contract_recon_path(contract, date_str)
-    return pq.ParquetFile(path).read(columns=columns)
-
-
 def get_mbo_front(
     product: str,
     date_str: str,
@@ -577,6 +588,124 @@ def get_mbo_front(
     return get_mbo(contract, date_str, columns=columns)
 
 
+def get_mbo_rth(
+    contract: str,
+    date_str: str,
+    columns: Optional[list[str]] = None,
+    session: str = "default",
+) -> pa.Table:
+    """
+    Load the normalized MBO event stream for a specific contract and date,
+    filtered to Regular Trading Hours (RTH) only.
+ 
+    Convenience wrapper around get_mbo() + filter_rth(). This is the standard
+    entry point for all Phase 3 feature engineering — always prefer this over
+    get_mbo() to avoid contaminating signals with overnight noise.
+ 
+    Parameters
+    ----------
+    contract : Contract symbol, e.g. 'ESZ25', 'NIYH26', 'HSIG26'.
+    date_str : Date in 'YYYY-MM-DD' or 'YYYYMMDD' format.
+    columns  : Optional column selection (Parquet column pruning). None = all columns.
+               Applied before RTH filtering — only selected columns are read from disk.
+    session  : Named session for multi-session products (NIY, NKD).
+               'default' → first declared session in market_config.py ('asia' for NIY/NKD).
+               'us'      → CME US session (13:30–20:00 UTC, NIY/NKD only).
+               Ignored for single-session products (ES, FDAX, HSI, ...).
+ 
+    Returns
+    -------
+    pyarrow.Table — MBO events within RTH bounds, sorted by ts_recv.
+ 
+    Examples
+    --------
+    >>> # Standard single-session products
+    >>> tbl = dr.get_mbo_rth("ESZ25",   "2025-10-10")
+    >>> tbl = dr.get_mbo_rth("HSIG26",  "2026-02-02")   # lunch break excluded
+    >>> tbl = dr.get_mbo_rth("FDAXM25", "2025-05-14")
+ 
+    >>> # Multi-session products (NIY, NKD)
+    >>> tbl = dr.get_mbo_rth("NIYH26", "2026-02-02")                # OSE session (default)
+    >>> tbl = dr.get_mbo_rth("NIYH26", "2026-02-02", session="us")  # CME US session
+    """
+    product = _product_from_contract(contract)
+    table   = get_mbo(contract, date_str, columns=columns)
+    return filter_rth(table, product, date_str, session=session)
+ 
+
+def get_mbo_front_rth(
+    product: str,
+    date_str: str,
+    columns: Optional[list[str]] = None,
+    session: str = "default",
+    method: str = "volume",
+) -> pa.Table:
+    """
+    Load the MBO event stream for the front-month contract of a product on a
+    given date, filtered to Regular Trading Hours (RTH) only.
+ 
+    Combines front-month detection, data loading, and RTH filtering in a single
+    call. This is the highest-level entry point for MBO-based feature engineering
+    and the recommended default for notebook exploration.
+ 
+    Parameters
+    ----------
+    product  : Product ticker, e.g. 'ES', 'NIY', 'HSI'.
+    date_str : Date in 'YYYY-MM-DD' or 'YYYYMMDD' format.
+    columns  : Optional column selection. None = all columns.
+    session  : Named session for multi-session products (NIY, NKD).
+               'default' → first declared session ('asia' for NIY/NKD).
+               'us'      → CME US session.
+               Ignored for single-session products.
+    method   : Front-month detection method: 'volume' (default) or 'expiry'.
+               See get_front_contract() for details.
+ 
+    Returns
+    -------
+    pyarrow.Table — front-month MBO events within RTH bounds.
+ 
+    Examples
+    --------
+    >>> # Recommended standard usage in Phase 3 feature engineering
+    >>> tbl = dr.get_mbo_front_rth("ES",  "2025-10-10")
+    >>> tbl = dr.get_mbo_front_rth("HSI", "2026-02-02")
+    >>> tbl = dr.get_mbo_front_rth("NIY", "2026-02-02", session="us")
+    """
+    contract = get_front_contract(product, date_str, method=method)
+    print(f"[dr] Front month for {product} on {date_str}: {contract}")
+    table = get_mbo(contract, date_str, columns=columns)
+    return filter_rth(table, product, date_str, session=session)
+ 
+
+def get_mbp1(
+    contract: str,
+    date_str: str,
+    columns: Optional[list[str]] = None,
+) -> pa.Table:
+    """
+    Load the reconstructed MBP-1 (top-of-book) snapshot stream for a specific
+    contract and date.
+
+    Parameters
+    ----------
+    contract : Contract symbol, e.g. 'ESZ25', 'HSIG26'.
+    date_str : Date in 'YYYY-MM-DD' or 'YYYYMMDD' format.
+    columns  : Optional list of column names to load. None = all columns.
+               Example: ['ts_recv', 'bid_px_00', 'ask_px_00', 'bid_sz_00', 'ask_sz_00']
+
+    Returns
+    -------
+    pyarrow.Table with the MBP-1 schema (one snapshot per F_LAST event).
+
+    Example
+    -------
+    >>> tbl = dr.get_mbp1("ESZ25", "2025-10-01")
+    >>> tbl = dr.get_mbp1("HSIG26", "2026-02-03", columns=["ts_recv", "bid_px_00", "ask_px_00"])
+    """
+    path = _contract_recon_path(contract, date_str)
+    return pq.ParquetFile(path).read(columns=columns)
+
+
 def get_mbp1_front(
     product: str,
     date_str: str,
@@ -605,6 +734,100 @@ def get_mbp1_front(
     contract = get_front_contract(product, date_str, method=method)
     print(f"[dr] Front month for {product} on {date_str}: {contract}")
     return get_mbp1(contract, date_str, columns=columns)
+
+ 
+def get_mbp1_rth(
+    contract: str,
+    date_str: str,
+    columns: Optional[list[str]] = None,
+    session: str = "default",
+) -> pa.Table:
+    """
+    Load the reconstructed MBP-1 (top-of-book) snapshot stream for a specific
+    contract and date, filtered to Regular Trading Hours (RTH) only.
+ 
+    Convenience wrapper around get_mbp1() + filter_rth(). This is the standard
+    entry point for LOB-based feature engineering (OFI, spread, depth signals).
+ 
+    Parameters
+    ----------
+    contract : Contract symbol, e.g. 'ESZ25', 'NIYH26', 'HSIG26'.
+    date_str : Date in 'YYYY-MM-DD' or 'YYYYMMDD' format.
+    columns  : Optional column selection. None = all columns.
+               Typical minimal set: ['ts_recv', 'bid_px_00', 'ask_px_00',
+                                     'bid_sz_00', 'ask_sz_00']
+    session  : Named session for multi-session products (NIY, NKD).
+               'default' → 'asia' (OSE Tokyo session).
+               'us'      → CME US session (13:30–20:00 UTC).
+               Ignored for single-session products.
+ 
+    Returns
+    -------
+    pyarrow.Table — MBP-1 snapshots within RTH bounds, sorted by ts_recv.
+ 
+    Examples
+    --------
+    >>> tbl = dr.get_mbp1_rth("ESZ25", "2025-10-10",
+    ...                        columns=["ts_recv", "bid_px_00", "ask_px_00",
+    ...                                 "bid_sz_00", "ask_sz_00"])
+    >>> tbl = dr.get_mbp1_rth("NIYH26", "2026-02-02", session="us")
+    """
+    product = _product_from_contract(contract)
+    table   = get_mbp1(contract, date_str, columns=columns)
+    return filter_rth(table, product, date_str, session=session)
+ 
+ 
+def get_mbp1_front_rth(
+    product: str,
+    date_str: str,
+    columns: Optional[list[str]] = None,
+    session: str = "default",
+    method: str = "volume",
+) -> pa.Table:
+    """
+    Load the MBP-1 (top-of-book) snapshot stream for the front-month contract
+    of a product on a given date, filtered to Regular Trading Hours (RTH) only.
+ 
+    This is the primary function for LOB-based feature engineering (OFI, spread,
+    depth, VPIN) across all Phase 3 research. Combines front-month detection,
+    MBP-1 loading, and RTH filtering in a single call.
+ 
+    Parameters
+    ----------
+    product  : Product ticker, e.g. 'ES', 'FDAX', 'HSI', 'NIY'.
+    date_str : Date in 'YYYY-MM-DD' or 'YYYYMMDD' format.
+    columns  : Optional column selection. None = all columns.
+               Recommended minimal set for OFI:
+                   ['ts_recv', 'bid_px_00', 'ask_px_00', 'bid_sz_00', 'ask_sz_00']
+               For spread analysis, add: 'action', 'side'
+    session  : Named session for multi-session products (NIY, NKD).
+               'default' → 'asia' (OSE Tokyo session, default for cross-market).
+               'us'      → CME US session (primary liquidity for NIY/NKD).
+               Ignored for single-session products.
+    method   : Front-month detection method: 'volume' (default) or 'expiry'.
+ 
+    Returns
+    -------
+    pyarrow.Table — front-month MBP-1 snapshots within RTH bounds.
+ 
+    Examples
+    --------
+    >>> # Standard OFI input — recommended for all Phase 3 feature notebooks
+    >>> cols = ["ts_recv", "bid_px_00", "ask_px_00", "bid_sz_00", "ask_sz_00"]
+    >>> tbl = dr.get_mbp1_front_rth("ES",   "2025-10-10", columns=cols)
+    >>> tbl = dr.get_mbp1_front_rth("FDAX", "2025-05-14", columns=cols)
+    >>> tbl = dr.get_mbp1_front_rth("HSI",  "2026-02-02", columns=cols)
+ 
+    >>> # NIY — OSE session (default, for cross-market comparison with HKEX)
+    >>> tbl = dr.get_mbp1_front_rth("NIY", "2026-02-02", columns=cols)
+ 
+    >>> # NIY — US session (for lead-lag analysis vs ES)
+    >>> tbl = dr.get_mbp1_front_rth("NIY", "2026-02-02", columns=cols, session="us")
+    """
+    contract = get_front_contract(product, date_str, method=method)
+    print(f"[dr] Front month for {product} on {date_str}: {contract}")
+    table = get_mbp1(contract, date_str, columns=columns)
+    return filter_rth(table, product, date_str, session=session)
 
 
 # ---------------------------------------------------------------------------
@@ -1126,44 +1349,55 @@ def filter_rth(
     table: pa.Table,
     product: str,
     date_str: str,
+    session: str = "default",
 ) -> pa.Table:
     """
     Filter a pyarrow.Table to Regular Trading Hours (RTH) only.
-
+ 
     Uses the RTH definition from market_config.py for the given product.
-    Handles DST-aware products (ES via us_eastern mode) and fixed-UTC products.
-
+    Handles DST-aware products (ES via us_eastern mode), fixed-UTC products,
+    fixed-CET products (EUREX), and multi-session products (NIY, NKD).
+ 
     Parameters
     ----------
     table    : pyarrow.Table with a 'ts_recv' column (uint64, nanoseconds UTC).
-    product  : Product ticker used to look up RTH bounds.
-    date_str : The trading date (needed for DST resolution on ES).
-
+    product  : Product ticker used to look up RTH bounds in market_config.py.
+    date_str : The trading date — required for DST resolution on ES (us_eastern).
+    session  : Named session for multi-session products (NIY, NKD).
+               'default' resolves to the first declared session ('asia').
+               Ignored for single-session products (ES, FDAX, HSI, ...).
+               Available sessions per product are declared in market_config.py.
+ 
     Returns
     -------
     pyarrow.Table filtered to RTH rows only.
-
+ 
     Notes
     -----
     Filtering is done via DuckDB on the in-memory Arrow table — zero copy
     (DuckDB registers the Arrow table as a view without copying data).
     For HKEX products with a lunch break, both morning and afternoon sessions
-    are included (lunch rows are excluded).
-
-    Example
-    -------
-    >>> tbl = dr.get_mbp1_front("ES", "2025-10-01")
-    >>> tbl_rth = dr.filter_rth(tbl, "ES", "2025-10-01")
+    are included (lunch rows are excluded automatically via market_config.py).
+ 
+    Examples
+    --------
+    >>> tbl = dr.get_mbp1_front("ES", "2025-10-10")
+    >>> tbl_rth = dr.filter_rth(tbl, "ES", "2025-10-10")
+ 
+    >>> tbl = dr.get_mbo("NIYH26", "2026-02-02")
+    >>> tbl_asia = dr.filter_rth(tbl, "NIY", "2026-02-02")               # OSE session (default)
+    >>> tbl_us   = dr.filter_rth(tbl, "NIY", "2026-02-02", session="us") # US session
     """
-    # Lazy import to avoid circular dependency at module load time
     from ingestion.market_config import rth_utc_bounds
-
+ 
     d   = _date_obj(date_str)
     cfg = _product_from_config(product)
-
-    # rth_utc_bounds returns (start_time_str, end_time_str) in "HH:MM:SS" UTC
-    rth_start_str, rth_end_str = rth_utc_bounds(d, cfg)
-
+ 
+    # rth_utc_bounds() dispatches on 'sessions' dict (multi-session products)
+    # or on rth_mode (single-session products). DST, CET conversion, and lunch
+    # break exclusion are all handled inside market_config.py.
+    rth_start_str, rth_end_str = rth_utc_bounds(d, cfg, session=session)
+ 
     # Convert "HH:MM:SS" UTC strings to nanosecond epoch offsets for this date
     def _hms_to_ns(date_obj: date, hms: str) -> int:
         """Convert a 'HH:MM:SS' UTC time on a given date to nanoseconds epoch."""
@@ -1172,16 +1406,18 @@ def filter_rth(
         dt = datetime(date_obj.year, date_obj.month, date_obj.day,
                       h, m, s, tzinfo=timezone.utc)
         return int(dt.timestamp()) * 10**9
-
+ 
     rth_start_ns = _hms_to_ns(d, rth_start_str)
     rth_end_ns   = _hms_to_ns(d, rth_end_str)
-
+ 
     con = duckdb.connect()
     # Register the Arrow table as a DuckDB view — zero-copy, no data movement
     con.register("tbl", table)
-
-    if cfg.get("lunch_break_start"):
+ 
+    if cfg.get("lunch_break_start") and session == "default":
         # HKEX: exclude lunch break — two sub-sessions
+        # Only apply lunch break exclusion for the default (daytime) session.
+        # Multi-session products (NIY/NKD) do not have a lunch break.
         lunch_start_ns = _hms_to_ns(d, cfg["lunch_break_start"])
         lunch_end_ns   = _hms_to_ns(d, cfg["lunch_break_end"])
         sql = f"""
@@ -1196,7 +1432,7 @@ def filter_rth(
             WHERE ts_recv >= {rth_start_ns}
               AND ts_recv <  {rth_end_ns}
         """
-
+ 
     result = con.execute(sql).arrow()
     con.close()
     return result
