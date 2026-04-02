@@ -982,6 +982,10 @@ def get_contract_stats(
     contract: str,
     date_str: str,
     schema: str = "mbo",
+    rth_start_ns: Optional[int] = None,
+    rth_end_ns: Optional[int] = None,
+    lunch_start_ns: Optional[int] = None,
+    lunch_end_ns: Optional[int] = None,
 ) -> dict:
     """
     Compute descriptive statistics for a contract on a given date.
@@ -989,34 +993,52 @@ def get_contract_stats(
 
     Parameters
     ----------
-    contract : Contract symbol, e.g. 'FDAXM25'.
-    date_str : Date in 'YYYY-MM-DD' or 'YYYYMMDD' format.
-    schema   : 'mbo' (default) — uses normalized MBO file.
-               'mbp1' — uses reconstructed MBP-1 file.
+    contract       : Contract symbol, e.g. 'FDAXM25'.
+    date_str       : Date in 'YYYY-MM-DD' or 'YYYYMMDD' format.
+    schema         : 'mbo' (default) — uses normalized MBO file.
+                     'mbp1' — uses reconstructed MBP-1 file.
+    rth_start_ns   : Optional RTH window start as nanosecond epoch (int).
+                     If provided together with rth_end_ns, the DuckDB query
+                     filters rows to [rth_start_ns, rth_end_ns). This avoids
+                     loading the full 24h file into Python and instead pushes
+                     the predicate into DuckDB's Parquet row-group pruning.
+    rth_end_ns     : Optional RTH window end as nanosecond epoch (int).
+    lunch_start_ns : Optional lunch break start (nanosecond epoch). Only used
+                     for HKEX products. Rows in [lunch_start_ns, lunch_end_ns)
+                     are excluded from the RTH window.
+    lunch_end_ns   : Optional lunch break end (nanosecond epoch).
 
     Returns
     -------
     dict with keys:
-        contract, date, schema, n_rows,
-        n_add, n_cancel, n_modify, n_trade, n_fill, n_clear,
+        contract, date, schema, session ('rth' if filtered, 'full' otherwise),
+        n_rows, n_add, n_cancel, n_modify, n_trade, n_fill, n_clear,
         cancel_rate   (n_cancel / n_add),
         fill_rate     (n_trade / n_add),
-        otr           (n_add / n_trade),
-        price_min, price_max, price_range_ticks,  (in fixed-point int64)
-        price_min_pts, price_max_pts,             (in index points)
+        order_to_trade_ratio  (n_add / n_trade),   ← renamed from 'otr' for clarity
+        price_min, price_max, price_range_ticks,   (in fixed-point int64)
+        price_min_pts, price_max_pts,              (in index points)
         tick_size_pts
 
     Notes
     -----
     DuckDB computes all aggregations in a single pass over the Parquet file.
-    Column statistics (min/max) are often available from Parquet metadata
-    without reading any row data. COUNT with GROUP BY requires a full scan of
-    the action column only (narrow column, fast).
+    When rth_start_ns / rth_end_ns are provided, DuckDB uses ts_recv min/max
+    Parquet row-group statistics to skip row groups outside the RTH window —
+    this is significantly faster than a full scan on 24h files.
+
+    The lunch break filter (HKEX) adds a second WHERE clause to exclude the
+    noon auction gap without requiring a second pass.
 
     Example
     -------
     >>> stats = dr.get_contract_stats("FDAXM25", "2025-05-14")
-    >>> print(stats["otr"], stats["cancel_rate"])
+    >>> print(stats["order_to_trade_ratio"], stats["cancel_rate"])
+
+    >>> # With RTH filter (called internally by get_product_stats)
+    >>> stats = dr.get_contract_stats("NIYZ25", "2025-03-10",
+    ...                               rth_start_ns=1741564800000000000,
+    ...                               rth_end_ns=1741583700000000000)
     """
     if schema == "mbo":
         path = _contract_norm_path(contract, date_str)
@@ -1030,21 +1052,40 @@ def get_contract_stats(
     cfg      = _product_from_config(product)
     tick_fp  = cfg["tick_size_fp"]  # fixed-point tick size (price * 1e9)
 
-    # Single DuckDB pass: COUNT per action + price min/max
+    # ------------------------------------------------------------------
+    # Build the WHERE clause dynamically.
+    # We always have at least one condition (TRUE) so the SQL is valid
+    # even when no filter is requested.
+    # ------------------------------------------------------------------
+    filters: list[str] = []
+
+    if rth_start_ns is not None and rth_end_ns is not None:
+        # RTH time window — DuckDB pushes this into Parquet row-group pruning
+        filters.append(f"ts_recv >= {rth_start_ns}")
+        filters.append(f"ts_recv <  {rth_end_ns}")
+
+    if lunch_start_ns is not None and lunch_end_ns is not None:
+        # Exclude HKEX lunch break (noon auction gap)
+        filters.append(f"NOT (ts_recv >= {lunch_start_ns} AND ts_recv < {lunch_end_ns})")
+
+    where_clause = ("WHERE " + "\n          AND ".join(filters)) if filters else ""
+
+    # Single DuckDB pass: COUNT per action + price min/max on TRADE rows only.
     # FILTER syntax (SQL:2003) avoids multiple table scans per action —
-    # DuckDB evaluates all aggregations in one sequential read.
+    # DuckDB evaluates all aggregations in one sequential read of the file.
     sql = f"""
         SELECT
-            COUNT(*)                                                            AS n_rows,
-            COUNT(*) FILTER (WHERE action = 'ADD')                              AS n_add,
-            COUNT(*) FILTER (WHERE action = 'CANCEL')                           AS n_cancel,
-            COUNT(*) FILTER (WHERE action = 'MODIFY')                           AS n_modify,
-            COUNT(*) FILTER (WHERE action = 'TRADE')                            AS n_trade,
-            COUNT(*) FILTER (WHERE action = 'FILL')                             AS n_fill,
-            COUNT(*) FILTER (WHERE action = 'CLEAR')                            AS n_clear,
-            MIN(price) FILTER (WHERE action = 'TRADE')                          AS price_min,
-            MAX(price) FILTER (WHERE action = 'TRADE')                          AS price_max
+            COUNT(*)                                                        AS n_rows,
+            COUNT(*) FILTER (WHERE action = 'ADD')                          AS n_add,
+            COUNT(*) FILTER (WHERE action = 'CANCEL')                       AS n_cancel,
+            COUNT(*) FILTER (WHERE action = 'MODIFY')                       AS n_modify,
+            COUNT(*) FILTER (WHERE action = 'TRADE')                        AS n_trade,
+            COUNT(*) FILTER (WHERE action = 'FILL')                         AS n_fill,
+            COUNT(*) FILTER (WHERE action = 'CLEAR')                        AS n_clear,
+            MIN(price) FILTER (WHERE action = 'TRADE')                      AS price_min,
+            MAX(price) FILTER (WHERE action = 'TRADE')                      AS price_max
         FROM read_parquet('{path_str}')
+        {where_clause}
     """
     con = duckdb.connect()
     row = con.execute(sql).fetchone()
@@ -1053,7 +1094,7 @@ def get_contract_stats(
     (n_rows, n_add, n_cancel, n_modify, n_trade,
      n_fill, n_clear, price_min, price_max) = row
 
-    # Derived metrics — guard against division by zero
+    # Derived ratios — guard against division by zero
     cancel_rate = (n_cancel / n_add)   if n_add   else None
     fill_rate   = (n_trade  / n_add)   if n_add   else None
     otr         = (n_add    / n_trade) if n_trade  else None
@@ -1067,28 +1108,30 @@ def get_contract_stats(
         else None
     )
 
-    ds_fmt = _date_str(date_str)
+    ds_fmt  = _date_str(date_str)
+    session = "rth" if (rth_start_ns is not None) else "full"
 
     return {
-        "contract":         contract,
-        "date":             f"{ds_fmt[:4]}-{ds_fmt[4:6]}-{ds_fmt[6:8]}",
-        "schema":           schema,
-        "n_rows":           int(n_rows),
-        "n_add":            int(n_add),
-        "n_cancel":         int(n_cancel),
-        "n_modify":         int(n_modify),
-        "n_trade":          int(n_trade),
-        "n_fill":           int(n_fill),
-        "n_clear":          int(n_clear),
-        "cancel_rate":      round(cancel_rate, 4) if cancel_rate is not None else None,
-        "fill_rate":        round(fill_rate,   4) if fill_rate   is not None else None,
-        "otr":              round(otr,         2) if otr         is not None else None,
-        "price_min":        int(price_min) if price_min is not None else None,
-        "price_max":        int(price_max) if price_max is not None else None,
-        "price_min_pts":    price_min_pts,
-        "price_max_pts":    price_max_pts,
-        "price_range_ticks": price_range_ticks,
-        "tick_size_pts":    tick_fp / 1e9,
+        "contract":              contract,
+        "date":                  f"{ds_fmt[:4]}-{ds_fmt[4:6]}-{ds_fmt[6:8]}",
+        "schema":                schema,
+        "session":               session,
+        "n_rows":                int(n_rows),
+        "n_add":                 int(n_add),
+        "n_cancel":              int(n_cancel),
+        "n_modify":              int(n_modify),
+        "n_trade":               int(n_trade),
+        "n_fill":                int(n_fill),
+        "n_clear":               int(n_clear),
+        "cancel_rate":           round(cancel_rate, 4) if cancel_rate is not None else None,
+        "fill_rate":             round(fill_rate,   4) if fill_rate   is not None else None,
+        "order_to_trade_ratio":  round(otr,         2) if otr         is not None else None,
+        "price_min":             int(price_min) if price_min is not None else None,
+        "price_max":             int(price_max) if price_max is not None else None,
+        "price_min_pts":         price_min_pts,
+        "price_max_pts":         price_max_pts,
+        "price_range_ticks":     price_range_ticks,
+        "tick_size_pts":         tick_fp / 1e9,
     }
 
 
@@ -1098,13 +1141,16 @@ def get_product_stats(
     end: str,
     schema: str = "mbo",
     contract: Optional[str] = None,
+    session: str = "default",
 ) -> "pd.DataFrame":
     """
-    Compute per-day statistics for a product over a date range.
+    Compute per-day RTH statistics for a product over a date range.
     Auto-detects front month per day unless `contract` is specified.
 
-    Uses DuckDB in a tight loop per day — each call is a single Parquet scan.
-    Returns a pandas DataFrame (stats are small — pandas is fine here).
+    RTH bounds are resolved per day from market_config.py (DST-aware for ES,
+    CET for EUREX, fixed UTC for HKEX, multi-session for NIY/NKD) and passed
+    directly to the DuckDB query inside get_contract_stats — no data is loaded
+    into Python RAM.
 
     Parameters
     ----------
@@ -1113,19 +1159,37 @@ def get_product_stats(
     end      : End date inclusive, 'YYYY-MM-DD'.
     schema   : 'mbo' or 'mbp1'.
     contract : If provided, use this specific contract for all days.
-               If None, auto-detect front month per day.
+               If None, auto-detect front month per day via volume method.
+    session  : Named session for multi-session products (NIY, NKD).
+               'default' → 'asia' session (OSE Tokyo, 01:00–06:15 UTC).
+               'us'      → US session (CME, 13:30–20:00 UTC).
+               Ignored for single-session products (ES, FDAX, HSI, ...).
 
     Returns
     -------
     pandas.DataFrame, one row per trading day, sorted by date.
-    Columns: same as get_contract_stats() dict keys.
+    Columns: same as get_contract_stats() dict keys, plus 'product'.
 
     Example
     -------
-    >>> df = dr.get_product_stats("NIY", "2025-01-01", "2025-06-30")
-    >>> df[["date", "n_trade", "otr", "cancel_rate"]].head(10)
+    >>> df = dr.get_product_stats("NIY", "2025-01-01", "2025-12-31")
+    >>> df[["date", "n_trade", "order_to_trade_ratio", "cancel_rate"]].head(10)
+
+    >>> # US session for NIY
+    >>> df_us = dr.get_product_stats("NIY", "2025-01-01", "2025-12-31", session="us")
     """
     import pandas as pd
+    from datetime import timezone
+    from ingestion.market_config import rth_utc_bounds
+
+    cfg = _product_from_config(product)
+
+    def _hms_to_ns(date_obj: date, hms: str) -> int:
+        """Convert 'HH:MM:SS' UTC string on a given date to nanosecond epoch."""
+        h, m, s = map(int, hms.split(":"))
+        dt = datetime(date_obj.year, date_obj.month, date_obj.day,
+                      h, m, s, tzinfo=timezone.utc)
+        return int(dt.timestamp()) * 10**9
 
     dates = get_available_dates(product, contract)
     # Filter to requested range
@@ -1134,22 +1198,44 @@ def get_product_stats(
     rows = []
     for d in dates:
         try:
+            # --- Front month detection: volume method is more robust than
+            # expiry around rollover days (switched from previous expiry default)
             if contract is None:
-                c = get_front_contract(product, d, method="expiry")
-                # Verify file exists for this contract
-                contracts_day = get_contracts(product, d)
-                if c not in contracts_day:
-                    # Front-month detection returned a contract not present this day
-                    # Fall back to first available outright
-                    outrights = [x for x in contracts_day if "_CAL_" not in x]
-                    if not outrights:
-                        continue
-                    c = outrights[0]
+                c = get_front_contract(product, d, method="volume")
             else:
                 c = contract
 
-            stats = get_contract_stats(c, d, schema=schema)
+            # --- Resolve RTH bounds for this specific day.
+            # rth_utc_bounds handles: DST (ES), CET offset (EUREX),
+            # multi-session dispatch (NIY/NKD), fixed UTC (HKEX).
+            d_obj = _date_obj(d)
+            rth_start_str, rth_end_str = rth_utc_bounds(d_obj, cfg, session=session)
+            rth_start_ns = _hms_to_ns(d_obj, rth_start_str)
+            rth_end_ns   = _hms_to_ns(d_obj, rth_end_str)
+
+            # --- Lunch break (HKEX only) — passed through to DuckDB WHERE
+            lunch_start_ns = None
+            lunch_end_ns   = None
+            if cfg.get("lunch_break_start") and session == "default":
+                lunch_start_ns = _hms_to_ns(d_obj, cfg["lunch_break_start"])
+                lunch_end_ns   = _hms_to_ns(d_obj, cfg["lunch_break_end"])
+
+            stats = get_contract_stats(
+                c, d,
+                schema=schema,
+                rth_start_ns=rth_start_ns,
+                rth_end_ns=rth_end_ns,
+                lunch_start_ns=lunch_start_ns,
+                lunch_end_ns=lunch_end_ns,
+            )
+            stats["product"] = product
+
+            # Skip days with no trades in the RTH window (e.g. Sunday CME files)
+            if stats["n_trade"] == 0:
+                continue
+            
             rows.append(stats)
+
         except (FileNotFoundError, ValueError):
             continue
 
@@ -1178,7 +1264,7 @@ def get_cross_market_summary(
     -------
     pandas.DataFrame with columns:
         product, contract, date, n_add, n_cancel, n_trade,
-        otr, cancel_rate, fill_rate,
+        order_to_trade_ratio, cancel_rate, fill_rate,
         price_min_pts, price_max_pts, tick_size_pts,
         currency, point_value, exchange
 
@@ -1213,7 +1299,7 @@ def get_cross_market_summary(
     col_order = [
         "product", "contract", "date", "exchange", "currency",
         "n_rows", "n_add", "n_cancel", "n_modify", "n_trade",
-        "otr", "cancel_rate", "fill_rate",
+        "order_to_trade_ratio", "cancel_rate", "fill_rate",
         "price_min_pts", "price_max_pts", "tick_size_pts", "point_value",
     ]
     df = pd.DataFrame(rows)
@@ -1435,7 +1521,7 @@ def filter_rth(
  
     result = con.execute(sql).arrow()
     con.close()
-    return result
+    return result.read_all()
 
 
 def with_datetime(
