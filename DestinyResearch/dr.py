@@ -1565,7 +1565,7 @@ def with_datetime(
     # epoch_ns(col) interprets the integer as nanoseconds since Unix epoch,
     # returning a TIMESTAMPTZ. All other columns are preserved via SELECT *.
     sql = f"""
-        SELECT *, epoch_ns(CAST({col} AS BIGINT)) AS {out_col}
+        SELECT *, to_timestamp(CAST({col} AS DOUBLE) / 1e9) AS {out_col}
         FROM tbl
     """
     result = con.execute(sql).arrow()
