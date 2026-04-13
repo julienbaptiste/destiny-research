@@ -191,14 +191,25 @@ def run_pipeline(product: str, date_str: str) -> bool:
         return False
 
     venue, provider = _PRODUCT_VENUE[product]
-    cmd = [
-        sys.executable,
-        str(REPO_ROOT / "ingestion" / "ingest.py"),
-        "batch",
-        "--provider", provider,
-        "--venue",    venue,
-        "--product",  product,
-    ]
+    if provider == "hkex":
+        # HKEX uses its own subcommand with --date instead of batch
+        cmd = [
+            sys.executable,
+            "-m", "ingestion.ingest",
+            "hkex",
+            "--product", product,
+            "--date",    date_str,
+            "--mode",    "LOOSE",
+        ]
+    else:
+        cmd = [
+            sys.executable,
+            "-m", "ingestion.ingest",
+            "batch",
+            "--provider", provider,
+            "--venue",    venue,
+            "--product",  product,
+        ]
     print(f"  [pipeline] {product} {date_str} ...", flush=True)
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(REPO_ROOT))
     if result.returncode != 0:

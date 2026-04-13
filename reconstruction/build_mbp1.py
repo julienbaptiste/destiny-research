@@ -88,6 +88,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from sortedcontainers import SortedDict
 
+from utils.logging_config import setup_logging
+
 # ---------------------------------------------------------------------------
 # Repo root + project imports
 # ---------------------------------------------------------------------------
@@ -110,11 +112,6 @@ from ingestion.schema import (                           # noqa: E402
 # Logging
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -1081,4 +1078,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    setup_logging()
     sys.exit(main())

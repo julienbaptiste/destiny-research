@@ -50,6 +50,8 @@ from .schema import (
     REJECTED_EVENTS_SCHEMA,
 )
 
+import logging
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # REJECTION REASONS
@@ -478,7 +480,7 @@ def validate_batch(
     return clean_table, rejected_table
 
 
-def print_stats(state: ValidatorState, contract: str, date_str: str) -> None:
+def log_stats(state: ValidatorState, contract: str, date_str: str) -> None:
     """
     Print end-of-day validation summary to stdout.
     Call after validate_batch() completes for a full session.
@@ -501,14 +503,9 @@ def print_stats(state: ValidatorState, contract: str, date_str: str) -> None:
     if total == 0:
         return
 
-    print(
-        f"[validator]"
-        f"  {contract:<22}"
-        f"  {date_str}"
-        f"  validated={total:>10,}"
-        f"  clean={clean:>10,} ({pct_clean:6.2f}%)"
-        f"  rejected={rejected:>5,}"
-        f"  warmup_skip={warmup_sk:>5,}"
+    log.info(
+        "  %-22s  %s  validated=%10s  clean=%10s (%6.2f%%)  rejected=%5d  warmup_skip=%5d",
+        contract, date_str, f"{total:,}", f"{clean:,}", pct_clean, rejected, warmup_sk,
     )
 
 

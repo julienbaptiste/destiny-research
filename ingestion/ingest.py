@@ -11,7 +11,7 @@ Pipeline per file:
     3. Stream events through adapter.translate() → validator.validate_event()
     4. Route clean events to per-instrument Parquet writers
     5. Write rejected events to per-instrument audit logs
-    6. Print end-of-session stats
+    6. Log end-of-session stats
 
 Output layout (per instrument, per day):
     data/normalized/provider=databento/venue=CME/product=ES/contract=ESZ25/
@@ -36,10 +36,18 @@ Memory management:
     - Buffers are flushed every BATCH_SIZE events and cleared.
     - Peak memory per instrument = BATCH_SIZE × ~200 bytes ≈ 100MB at 500k.
     - With 10+ instruments per file, keep BATCH_SIZE ≤ 100_000 on 16GB RAM.
+
+TODO (logging cleanup):
+    - Remove the `verbose` parameter from ingest_file() and ingest_product()
+      once we decide to fully commit to log-level-based verbosity control.
+      Detailed messages (registered instruments, warmup ended, already
+      normalized skipping) should become log.debug() calls, controllable
+      via setup_logging(level=logging.DEBUG) without touching call sites.
 """
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections import defaultdict
 from datetime import date
@@ -59,7 +67,11 @@ from .schema import (
     normalized_path,
     rejected_path,
 )
-from .validator import ValidatorState, validate_event, print_stats
+from .validator import ValidatorState, validate_event, log_stats
+
+# Module-level logger — never call setup_logging() from here.
+# setup_logging() is called once in the if __name__ == "__main__" block.
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +238,7 @@ def ingest_file(
         session_date:   Calendar date of this file (used for symbol resolution
                         and output path construction)
         mode:           ValidationMode.STRICT or ValidationMode.LOOSE
-        verbose:        Print progress and stats to stdout
+        verbose:        Log progress and stats (passed through to helpers)
 
     Returns:
         dict: per-contract event counts {"ESZ25": 1_234_567, ...}
@@ -254,15 +266,15 @@ def ingest_file(
     adapter.open_session(raw_path, config)
 
     if verbose:
-        print(f"[ingest] {provider} | {raw_path.name} | {session_date} | mode={mode}")
+        log.info("%s | %s | %s | mode=%s", provider, raw_path.name, session_date, mode)
 
     # ------------------------------------------------------------------
     # 2. Pre-build instrument map from metadata
     #    Falls back to lazy resolution if list_instruments() returns empty.
     # ------------------------------------------------------------------
-    instruments   : dict[int, ContractInfo] = {}  # instrument_id → ContractInfo
-    writer_ctx    : dict[str, _WriterContext] = {} # contract → _WriterContext
-    validator_states: dict[str, ValidatorState] = {} # contract → ValidatorState
+    instruments    : dict[int, ContractInfo]  = {}  # instrument_id → ContractInfo
+    writer_ctx     : dict[str, _WriterContext] = {}  # contract → _WriterContext
+    validator_states: dict[str, ValidatorState] = {}  # contract → ValidatorState
 
     known_contracts = adapter.list_instruments()
     for info in known_contracts:
@@ -272,7 +284,7 @@ def ingest_file(
         )
 
     if verbose:
-        print(f"[ingest]   {len(known_contracts)} instruments found in metadata")
+        log.info("  %d instruments found in metadata", len(known_contracts))
 
     # ------------------------------------------------------------------
     # 3. Stream events
@@ -303,7 +315,7 @@ def ingest_file(
                 mode, instruments, writer_ctx, validator_states, verbose,
             )
 
-        ctx   = writer_ctx[contract]
+        ctx    = writer_ctx[contract]
         vstate = validator_states[contract]
 
         # --- Warmup boundary detection ---
@@ -315,10 +327,7 @@ def ingest_file(
         if not is_warmup and vstate.warmup_mode:
             vstate.warmup_end()
             if verbose:
-                print(
-                    f"[ingest]   {contract} warmup ended "
-                    f"(ts_event={event['ts_event']})"
-                )
+                log.info("  %s warmup ended (ts_event=%s)", contract, event["ts_event"])
 
         # --- Validate ---
         is_clean, reason = validate_event(event, vstate)
@@ -337,7 +346,7 @@ def ingest_file(
                 ctx.append_clean(flagged)
 
     # ------------------------------------------------------------------
-    # 4. Close all writers and print stats
+    # 4. Close all writers and log stats
     # ------------------------------------------------------------------
     counts: dict[str, int] = {}
 
@@ -346,13 +355,12 @@ def ingest_file(
         counts[contract] = ctx.n_clean
 
     if verbose:
-        print(
-            f"[ingest]   total={n_total:,} | "
-            f"dropped(pre-validation)={n_dropped:,} | "
-            f"instruments={len(writer_ctx)}"
+        log.info(
+            "  total=%s | dropped(pre-validation)=%s | instruments=%d",
+            f"{n_total:,}", f"{n_dropped:,}", len(writer_ctx),
         )
         for contract, vstate in validator_states.items():
-            print_stats(vstate, contract, date_str)
+            log_stats(vstate, contract, date_str)
 
     adapter.close_session()
     return counts
@@ -385,26 +393,26 @@ def ingest_product(
                             venue=CME/product=ES/
         normalized_dir: Root normalized directory.
         mode:           ValidationMode.STRICT or LOOSE.
-        verbose:        Print progress per file.
+        verbose:        Log progress per file.
         overwrite:      If False, skip files whose normalized output already
                         exists. Allows resuming interrupted batch runs.
     """
-    # Collect raw files sorted chronologically
+    # Collect raw files sorted chronologically.
     # Match only MBO files — exclude mbp1, mbp10, and other schemas
     # that may coexist in the same raw directory.
     raw_files = sorted(raw_dir.rglob("*.mbo.dbn.zst"))
 
     if not raw_files:
-        print(f"[ingest] No .dbn.zst files found in {raw_dir}", file=sys.stderr)
+        log.warning("No .dbn.zst files found in %s", raw_dir)
         return
 
-    print(f"[ingest] Found {len(raw_files)} files to process in {raw_dir}")
+    log.info("Found %d files to process in %s", len(raw_files), raw_dir)
 
     for raw_path in raw_files:
         # Extract date from filename: "glbx-mdp3-20251027.mbo.dbn.zst"
         session_date = _extract_date_from_filename(raw_path)
         if session_date is None:
-            print(f"[ingest] WARNING: cannot extract date from {raw_path.name} — skipping")
+            log.warning("Cannot extract date from %s — skipping", raw_path.name)
             continue
 
         # Skip if output already exists and overwrite=False.
@@ -442,7 +450,7 @@ def ingest_product(
                 existing = list(normalized_dir.rglob(f"*_{date_str}_mbo.parquet"))
             if existing:
                 if verbose:
-                    print(f"[ingest]   {raw_path.name} → already normalized, skipping")
+                    log.info("  %s → already normalized, skipping", raw_path.name)
                 continue
 
         try:
@@ -456,10 +464,7 @@ def ingest_product(
             )
         except Exception as exc:
             # Log error and continue — do not abort the batch
-            print(
-                f"[ingest] ERROR processing {raw_path.name}: {exc}",
-                file=sys.stderr,
-            )
+            log.error("Error processing %s: %s", raw_path.name, exc)
             # Ensure adapter session is closed even on error
             try:
                 adapter.close_session()
@@ -520,12 +525,12 @@ def _register_instrument(
         date_str = date_str,
     )
 
-    writer_ctx[info.contract]      = _WriterContext(clean_p, rej_p)
+    writer_ctx[info.contract]       = _WriterContext(clean_p, rej_p)
     validator_states[info.contract] = ValidatorState(mode=mode, warmup_mode=True)
 
     if verbose:
         label = " [SPREAD]" if info.is_spread else ""
-        print(f"[ingest]   registered {info.contract}{label} → {clean_p.name}")
+        log.info("  registered %s%s → %s", info.contract, label, clean_p.name)
 
 
 def _extract_date_from_filename(path: Path) -> date | None:
@@ -594,7 +599,7 @@ def _get_adapter(provider: str):
         "hkex": HKEXAdapter,
     }
     if provider not in adapters:
-        print(f"ERROR: unknown provider '{provider}'. Available: {list(adapters)}")
+        log.error("Unknown provider '%s'. Available: %s", provider, list(adapters))
         sys.exit(1)
     return adapters[provider]()
 
@@ -613,7 +618,7 @@ def _cmd_file(args) -> None:
     """Single-file ingestion."""
     raw_path = Path(args.path)
     if not raw_path.exists():
-        print(f"ERROR: file not found: {raw_path}")
+        log.error("File not found: %s", raw_path)
         sys.exit(1)
 
     # Derive provider from path (provider=databento segment)
@@ -635,7 +640,7 @@ def _cmd_file(args) -> None:
     session_date   = _extract_date_from_filename(raw_path)
 
     if session_date is None:
-        print(f"ERROR: cannot extract date from filename: {raw_path.name}")
+        log.error("Cannot extract date from filename: %s", raw_path.name)
         sys.exit(1)
 
     adapter = _get_adapter(provider)
@@ -648,9 +653,9 @@ def _cmd_file(args) -> None:
         verbose        = True,
     )
 
-    print("\n[ingest] Summary:")
+    log.info("Summary:")
     for contract, n in sorted(counts.items()):
-        print(f"  {contract}: {n:,} clean events")
+        log.info("  %s: %s clean events", contract, f"{n:,}")
 
 
 def _cmd_batch(args) -> None:
@@ -674,7 +679,7 @@ def _cmd_batch(args) -> None:
         raw_dir = raw_dir / f"product={args.product}"
 
     if not raw_dir.exists():
-        print(f"ERROR: raw directory not found: {raw_dir}")
+        log.error("Raw directory not found: %s", raw_dir)
         sys.exit(1)
 
     # If --product is specified: single adapter batch run
@@ -690,8 +695,8 @@ def _cmd_batch(args) -> None:
             # raw_dir itself might be the product level
             product_dirs = [raw_dir]
 
-    print(f"[ingest] Batch scope: {raw_dir}")
-    print(f"[ingest] Product directories: {len(product_dirs)}")
+    log.info("Batch scope: %s", raw_dir)
+    log.info("Product directories: %d", len(product_dirs))
 
     for product_dir in product_dirs:
         adapter = _get_adapter(args.provider)
@@ -723,14 +728,14 @@ def _cmd_hkex(args) -> None:
                             / f"product={product}" / f"year={year}"
                             / f"month={month}")
             if not raw_month_dir.exists():
-                print(f"ERROR: raw directory not found: {raw_month_dir}")
+                log.error("Raw directory not found: %s", raw_month_dir)
                 sys.exit(1)
             # Discover days from orders parquet filenames
             orders_files = sorted(raw_month_dir.glob(
                 f"hkex-{product.lower()}_????????_orders.parquet"
             ))
             if not orders_files:
-                print(f"ERROR: no orders parquet found in {raw_month_dir}")
+                log.error("No orders parquet found in %s", raw_month_dir)
                 sys.exit(1)
             # Extract dates from filenames: hkex-hsi_20260203_orders.parquet → 2026-02-03
             dates = [
@@ -740,8 +745,7 @@ def _cmd_hkex(args) -> None:
                 for f in orders_files
             ]
 
-        print(f"[ingest] HKEX | product={product} | "
-            f"{len(dates)} day(s) | mode={args.mode}")
+        log.info("HKEX | product=%s | %d day(s) | mode=%s", product, len(dates), args.mode)
 
         skipped = 0
         for date_str in dates:
@@ -751,11 +755,11 @@ def _cmd_hkex(args) -> None:
                     / f"month={month}")
 
             if not raw_dir.exists():
-                print(f"  SKIP {date_str} — raw dir not found")
+                log.info("  SKIP %s — raw dir not found", date_str)
                 continue
 
-            # Skip check — use front month sentinel if known, else first contract
-            # We check for any normalized file for this date to detect already-processed days
+            # Skip check — use front month sentinel if known, else first contract.
+            # We check for any normalized file for this date to detect already-processed days.
             norm_product_dir = (normalized_dir / "provider=HKEX" / "venue=HKEX"
                                 / f"product={product}")
             existing = list(norm_product_dir.rglob(
@@ -763,9 +767,11 @@ def _cmd_hkex(args) -> None:
             )) if norm_product_dir.exists() else []
 
             if existing and not args.overwrite:
-                print(f"  SKIP {date_str} — already normalized "
-                    f"({len(existing)} contract(s)) "
-                    f"(use --overwrite to reprocess)")
+                log.info(
+                    "  SKIP %s — already normalized (%d contract(s)) "
+                    "(use --overwrite to reprocess)",
+                    date_str, len(existing),
+                )
                 skipped += 1
                 continue
 
@@ -781,12 +787,13 @@ def _cmd_hkex(args) -> None:
                 verbose        = True,
             )
 
-            print(f"  {date_str} → "
-                f"{sum(counts.values()):,} clean events "
-                f"across {len(counts)} contract(s)")
+            log.info(
+                "  %s → %s clean events across %d contract(s)",
+                date_str, f"{sum(counts.values()):,}", len(counts),
+            )
 
-        print(f"[ingest] Done. {len(dates) - skipped} processed, {skipped} skipped.")
-    print(f"[ingest] All done.")
+        log.info("Done. %d processed, %d skipped.", len(dates) - skipped, skipped)
+    log.info("All done.")
 
 
 def main() -> None:
@@ -861,4 +868,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from utils.logging_config import setup_logging
+    setup_logging()
     main()
