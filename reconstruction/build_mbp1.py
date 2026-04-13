@@ -226,7 +226,7 @@ class Book:
                  "_n_orphan_modify")
 
     def __init__(self) -> None:
-        self.orders_by_id   : dict[int, _Order]             = {}
+        self.orders_by_id   : dict[tuple[int,str], _Order]  = {}
         self.offers         : SortedDict[int, _LevelOrders] = SortedDict()
         self.bids           : SortedDict[int, _LevelOrders] = SortedDict()
         # Counters for GTC orphan events (EUREX cross-session orders)
@@ -397,7 +397,7 @@ def _book_add(
         levels[price] = lo
     else:
         level = book._get_or_insert_level(price, side)
-        book.orders_by_id[order_id] = order
+        book.orders_by_id[(order_id, side)] = order
         level.add_order(order, is_tob=False)
 
 
@@ -409,13 +409,14 @@ def _book_cancel(
     order_id : int,
 ) -> None:
     """Partially or fully cancel a resting order."""
-    if order_id not in book.orders_by_id:
+    if (order_id, side) not in book.orders_by_id:
         book._n_orphan_cancel += 1
         return
 
-    order = book.orders_by_id[order_id]
+    order = book.orders_by_id[(order_id, side)]
     level = book._get_level(price, side)
     if level is None:
+        book._n_orphan_cancel += 1
         return
 
     old_size   = order.size
@@ -423,9 +424,7 @@ def _book_cancel(
 
     if order.size == 0:
         # Fully cancelled — remove from book.
-        # Fix (25/03/2026): use old_size directly instead of going through
-        # remove_order(), which would read order.size after it was set to 0.
-        book.orders_by_id.pop(order_id)
+        book.orders_by_id.pop((order_id, side))
         is_tob = bool(order.flags & 0x01)
         level.size -= old_size
         if not is_tob:
@@ -440,7 +439,6 @@ def _book_cancel(
         # Partial cancel — update incremental size in place
         level.update_size(old_size, order.size)
 
-
 def _book_modify(
     book     : Book,
     price    : int,
@@ -450,13 +448,13 @@ def _book_modify(
     flags    : int,
 ) -> None:
     """Modify price and/or size of a resting order."""
-    if order_id not in book.orders_by_id:
+    if (order_id, side) not in book.orders_by_id:
         # GTC orphan — treat as ADD (MODIFY fallback for cross-session orders)
         book._n_orphan_modify += 1
         _book_add(book, price, size, side, order_id, flags)
         return
 
-    order  = book.orders_by_id[order_id]
+    order  = book.orders_by_id[(order_id, side)]
     level  = book._get_level(order.price, order.side)
     is_tob = bool(order.flags & 0x01)
 
@@ -489,7 +487,7 @@ def _book_modify(
         order.flags = flags
         level.update_size(old_size, size)
 
-    book.orders_by_id[order_id] = order
+    book.orders_by_id[(order_id, side)] = order
 
 
 # ---------------------------------------------------------------------------

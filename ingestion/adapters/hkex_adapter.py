@@ -48,7 +48,7 @@ KEY DESIGN DECISIONS
        332 (DeleteOrder)   → CANCEL
        335 (OrderbookClear)→ CLEAR
        364 (COP)           → NONE   (informational, not a book event)
-       350 (Trade)         → TRADE
+       350 (Trade)         → TRADE  + synthetic CANCEL (see §10 below)
    Note: ModifyOrder (331) is never observed in practice — HKEX emits
    Delete+Add pairs instead. Mapped to MODIFY if encountered.
 
@@ -87,6 +87,40 @@ KEY DESIGN DECISIONS
    contract during iter_events(), routing each event to its contract's writer
    via the ContractInfo returned by resolve_contract().
 
+10. SYNTHETIC CANCEL ON TRADE — passive order book decrement
+    (added 2026-04-08, ref: HKEX OMD-D spec §3.5 Trade message)
+
+    HKEX Trade (350) carries the order_id of the PASSIVE resting order
+    (not the aggressor). Per the OMD-D specification:
+
+        "If the OrderID within the Trade (350) message is non-zero then
+         users must reduce the resting order identified by the 'Quantity'
+         within the Trade (350) message. If the outstanding quantity is
+         zero the order must be deleted."
+
+    Unlike Databento (which emits explicit FILL events that the reconstruction
+    engine can process), HKEX provides no separate message to decrement the
+    resting order on a fill. Without compensation, the book accumulates stale
+    liquidity after every trade → crossed spreads in the reconstructed MBP-1.
+
+    Solution: for every Trade (350) with order_id > 0, the adapter emits TWO
+    normalized events:
+        1. TRADE  — the original trade event (unchanged)
+        2. CANCEL — a synthetic cancel that decrements the passive resting
+                    order by the traded quantity
+
+    Trades with order_id == 0 are leg trades from combo-vs-combo executions
+    (per OMD-D spec). They have no associated resting order to decrement →
+    only the TRADE event is emitted, no synthetic CANCEL.
+
+    The synthetic CANCEL uses the same timestamps, sequence, price, side,
+    and order_id as the TRADE — the reconstruction engine's _book_cancel()
+    handles partial and full cancels correctly.
+
+    HKEX does NOT emit a separate DeleteOrder (332) after a fill. Deletes
+    only occur on participant-initiated cancellations or as part of
+    Delete+Add modify sequences. There is no risk of double-decrement.
+
 ═══════════════════════════════════════════════════════════════════════════════
 USAGE (via ingest.py orchestrator)
 ═══════════════════════════════════════════════════════════════════════════════
@@ -120,6 +154,7 @@ In ingest.py _get_adapter(), add:
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date
 from pathlib import Path
@@ -170,12 +205,11 @@ _ORDER_SIDE_MAP: dict[int, str] = {
 }
 
 # Raw trade side (int8) → normalized Side string
-# Convention: trade side = passive side of the book (the side that was resting).
-# 0=N/A, 2=Buy aggressor (→ passive ASK was hit), 3=Sell aggressor (→ passive BID was hit)
+# Convention: trade side = Side of Orderbook ID
 _TRADE_SIDE_MAP: dict[int, str] = {
     0: Side.NONE,
-    2: Side.ASK,    # Buy aggressor → resting ASK was consumed
-    3: Side.BID,    # Sell aggressor → resting BID was consumed
+    2: Side.BID,    # Buy order (passive) → BID side of book was consumed
+    3: Side.ASK,    # Sell order (passive) → ASK side of book was consumed
 }
 
 # Regex: HKEX futures symbol e.g. "HSIH6", "MHIG6", "HHIU6", "MCHZ6"
@@ -231,8 +265,8 @@ def _parse_hkex_symbol(
     """
     Parse an HKEX futures symbol into (product, contract).
 
-    Returns None if the symbol cannot be parsed (options, combos, or
-    unrecognized format) — the instrument will be skipped by the adapter.
+    Returns None if the symbol does not match the expected futures format
+    (e.g. options have a different format with strike + P/C).
 
     Examples:
         "HSIH6"  → ("HSI",  "HSIH26")   H=March 2026
@@ -294,10 +328,18 @@ class HKEXAdapter(BaseAdapter):
         self._ob_map      : dict[int, ContractInfo] = {}
 
         # Stats specific to HKEX
-        self._n_unknown_symbol : int = 0
-        self._n_clears         : int = 0
-        self._n_cops           : int = 0
-        self._n_mod_orders     : int = 0   # should be 0 — HKEX emits Del+Add
+        self._n_unknown_symbol    : int = 0
+        self._n_clears            : int = 0
+        self._n_cops              : int = 0
+        self._n_mod_orders        : int = 0   # should be 0 — HKEX emits Del+Add
+        self._n_synthetic_cancels : int = 0   # CANCEL events synthesized from Trade (350)
+
+        # Shadow state: resting order sizes AND prices for DeleteOrder resolution.
+        # Keyed by order_id → (resting_size_lots, price_fp).
+        # price_fp is required because DeleteOrder (332) carries price=0 in the
+        # raw feed — without the cached price, _book_cancel() finds no level and
+        # silently skips the cancel, leaving phantom orders in the book.
+        self._order_sizes : dict[int, tuple[int, int]] = {}
 
         # In HKEXAdapter.__init__(), add:
         self._batch_size_rows: int = _DEFAULT_BATCH_SIZE_ROWS
@@ -347,6 +389,7 @@ class HKEXAdapter(BaseAdapter):
         self._trades_path = None
         self._symbol_map.clear()
         self._ob_map.clear()
+        self._order_sizes.clear()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Instrument resolution
@@ -464,129 +507,144 @@ class HKEXAdapter(BaseAdapter):
 
     def _iter_raw(self) -> Iterator[dict]:
         """
-        Yield raw event dicts from the merged orders+trades stream.
+        Yield raw event dicts from the merged orders+trades stream,
+        sorted by seq_num (global OMD-D channel counter shared across
+        both files — guarantees correct interleaving of orders and trades).
 
-        Memory-efficient merge sort using PyArrow streaming + heapq.merge().
-
-        Key optimizations vs previous version:
-        1. Columnar-first: batches stay as Arrow RecordBatches until the
-            last possible moment — no intermediate Python dict explosion.
-        2. Controlled batch size: batch_size_rows caps the number of rows
-            held in RAM per file at any time. Two files open simultaneously
-            → peak RAM = 2 × batch_size_rows × bytes_per_row.
-            At 50k rows × ~250 bytes ≈ 25 MB per file → ~50 MB peak for
-            the merge buffers alone. Add Python overhead → ~200-300 MB total.
-        3. Column pre-selection: we only decode the columns we actually use
-            in translate(), skipping lot_type/order_type/orderbook_position
-            which are present in the raw but not needed for normalization.
-        4. to_pylist() per micro-batch: converts one Arrow batch to a list
-            of dicts in a single C++ call — much faster than row-by-row
-            dict construction in Python.
-
-        Merge correctness:
-        Both files are written in chronological order by hkex_raw_parser
-        (sequential binary scan → sequential write). Each batch is already
-        sorted internally. heapq.merge() performs an O(n) n-way merge on
-        pre-sorted iterables — no global sort, no RAM spike.
-
-        Parameters (class-level, set in __init__ or overridden for testing):
-        _BATCH_SIZE_ROWS : int  rows per Arrow batch (default 50_000)
+        Uses DuckDB UNION ALL + ORDER BY seq_num on the two parquet files.
+        At ~750 MB total, DuckDB handles this comfortably within 4 GB limit
+        without spilling. Results are streamed back in Arrow batches to
+        avoid materializing the full result set in Python memory.
         """
-        import heapq
-        import pyarrow.parquet as pq
+        import duckdb
+        import os
 
         assert self._orders_path is not None, "open_session() not called"
 
-        # Columns needed from the orders file for translate()
-        # Omitting lot_type, order_type, orderbook_position — not used downstream
-        ORDERS_COLS = [
-            "send_time_ns", "seq_num", "msg_index", "msg_type",
-            "orderbook_id", "symbol", "class_code",
-            "order_id", "price", "quantity", "side",
-        ]
-
-        # Columns needed from the trades file
-        TRADES_COLS = [
-            "send_time_ns", "seq_num", "msg_index",
-            "orderbook_id", "symbol", "class_code",
-            "order_id", "price", "quantity", "side",
-            "trade_time_ns", "trade_id", "deal_type", "combo_group_id",
-        ]
-
-        # Batch size — controls peak RAM.
-        # 50k rows × ~250 bytes × 2 files ≈ 25 MB merge buffer
-        # Increase to 200k if you want fewer Python round-trips (more RAM).
         BATCH_ROWS = getattr(self, "_batch_size_rows", 50_000)
 
-        def _iter_orders(path: Path) -> Iterator[tuple]:
-            """
-            Stream orders parquet in sorted batches.
-
-            Yields (send_time_ns, seq_num, msg_index, row_dict) tuples.
-            Each batch is converted from columnar Arrow to row dicts via
-            to_pylist() — a single C++ call per batch, not per row.
-            """
-            pf = pq.ParquetFile(path)
-            for batch in pf.iter_batches(
-                batch_size=BATCH_ROWS,
-                columns=ORDERS_COLS,
-            ):
-                # to_pylist() converts the entire batch columnar → list[dict]
-                # in one C++ call. Much faster than row-by-row dict construction.
-                rows = batch.to_pylist()
-                for row in rows:
-                    row["source"] = "order"
-                    yield (
-                        row["send_time_ns"],
-                        row["seq_num"],
-                        row["msg_index"],
-                        row,
-                    )
-
-        def _iter_trades(path: Path) -> Iterator[tuple]:
-            """
-            Stream trades parquet in sorted batches.
-            Injects msg_type=350 (absent from trades schema by design).
-            """
-            pf = pq.ParquetFile(path)
-            for batch in pf.iter_batches(
-                batch_size=BATCH_ROWS,
-                columns=TRADES_COLS,
-            ):
-                rows = batch.to_pylist()
-                for row in rows:
-                    row["source"]   = "trade"
-                    row["msg_type"] = 350   # inject — absent from trades schema
-                    yield (
-                        row["send_time_ns"],
-                        row["seq_num"],
-                        row["msg_index"],
-                        row,
-                    )
-
-        # heapq.merge: O(n) n-way merge on pre-sorted iterables.
-        # Both files are written chronologically by hkex_raw_parser →
-        # each batch is already sorted → merge is correct without global sort.
-        iterables = [_iter_orders(self._orders_path)]
-        if self._trades_path is not None:
-            iterables.append(_iter_trades(self._trades_path))
-
-        merged = heapq.merge(*iterables)
-
-        for _, _, _, row in merged:
-            yield row
-
-    def translate(self, raw_event: dict) -> dict | None:
+        # Columns to select from each file — only what translate() needs.
+        # Missing columns are filled with NULL and cast to the correct type.
+        # Both sides of the UNION ALL must have identical column names and types.
+        orders_sql = f"""
+            SELECT
+                send_time_ns,
+                seq_num,
+                msg_index,
+                msg_type,
+                orderbook_id,
+                symbol,
+                class_code,
+                order_id,
+                price,
+                CAST(quantity AS BIGINT)    AS quantity,
+                side,
+                NULL::BIGINT                AS trade_time_ns,
+                NULL::BIGINT                AS trade_id,
+                NULL::TINYINT               AS deal_type,
+                NULL::INTEGER               AS combo_group_id,
+                'order'                     AS source
+            FROM read_parquet('{self._orders_path}')
         """
-        Translate one raw HKEX event dict to a normalized MBO event dict.
 
-        Returns None for:
-          - Unknown orderbook_id (unresolved instrument — options, combos, etc.)
-          - COP (msg_type=364) — informational, not a book event
-          - Trade with combo_group_id != 0 — combination leg, avoid double-count
-            (same logic as Databento non-printable filter, but more conservative:
-             we use combo_group_id rather than deal_type for the adapter layer;
-             the researcher can further filter by deal_type & 1 if needed)
+        if self._trades_path is not None:
+            trades_sql = f"""
+            UNION ALL
+            SELECT
+                send_time_ns,
+                seq_num,
+                msg_index,
+                350::INTEGER                AS msg_type,
+                orderbook_id,
+                symbol,
+                class_code,
+                order_id,
+                price,
+                CAST(quantity AS BIGINT)    AS quantity,
+                side,
+                trade_time_ns,
+                trade_id,
+                deal_type,
+                combo_group_id,
+                'trade'                     AS source
+            FROM read_parquet('{self._trades_path}')
+            """
+        else:
+            trades_sql = ""
+
+        query = f"""
+            SELECT *
+            FROM (
+                {orders_sql}
+                {trades_sql}
+            )
+            ORDER BY seq_num
+        """
+
+        import os
+        os.makedirs('/tmp/duckdb_hkex_spill', exist_ok=True)
+        
+        con = duckdb.connect()
+        con.execute("SET memory_limit='6GB'")
+        con.execute("SET temp_directory='/tmp/duckdb_hkex_spill'")
+
+        # Stream results as Arrow record batches — avoids materializing
+        # the full result set in Python memory.
+        reader = con.execute(query).fetch_record_batch(BATCH_ROWS)
+
+        try:
+            while True:
+                try:
+                    batch = reader.read_next_batch()
+                except StopIteration:
+                    break
+                for row in batch.to_pylist():
+                    yield row
+        finally:
+            con.close()
+
+    def iter_events(self) -> Iterator[dict | None]:
+        """
+        Override BaseAdapter.iter_events() to handle translate() returning
+        a list of events (TRADE + synthetic CANCEL) instead of a single dict.
+
+        For most event types, translate() returns a single-element list.
+        For Trade (350) with order_id > 0, it returns [TRADE, CANCEL] — both
+        events are yielded in sequence so the downstream pipeline (validator,
+        writer) sees them as two separate normalized events.
+
+        This override is HKEX-specific. The Databento adapter uses the default
+        BaseAdapter.iter_events() which expects translate() → dict | None.
+        """
+        assert self._is_open, "open_session() must be called before iter_events()"
+
+        for raw_event in self._iter_raw():
+            result = self.translate(raw_event)
+            if result is None:
+                self._n_dropped += 1
+                yield None
+            else:
+                # translate() returns list[dict] — unroll for the downstream pipeline
+                for event in result:
+                    self._n_yielded += 1
+                    yield event
+
+    def translate(self, raw_event: dict) -> list[dict] | None:
+        """
+        Translate one raw HKEX event dict to normalized MBO event(s).
+
+        Returns:
+            list[dict] — one or two normalized events:
+                - Most event types: single-element list [event]
+                - Trade (350) with order_id > 0: [TRADE, synthetic CANCEL]
+                  (see module docstring §10 for rationale)
+                - Trade (350) with order_id == 0: [TRADE] only
+                  (combo leg trade, no resting order to decrement)
+            None — event should be dropped:
+                - Unknown orderbook_id (unresolved instrument)
+                - COP (msg_type=364) — informational, not a book event
+                - Trade with combo_group_id != 0 — combination leg, avoid
+                  double-count (same logic as Databento non-printable filter)
 
         Handles all 5 order message types (330/331/332/335/364) and trades (350).
         """
@@ -625,8 +683,8 @@ class HKEXAdapter(BaseAdapter):
         # ── Price normalization ───────────────────────────────────────────────
         # NumberOfDecimalsPrice = 0 for HSI/MHI/HHI/MCH (confirmed empirically).
         # raw Int32 price in index points → multiply by FIXED_PRICE_SCALE (1e9).
-        # Price = 0 on Delete (332) and Clear (335) — kept as 0 (validator will
-        # accept 0 for CANCEL/CLEAR actions).
+        # Price = 0 on Delete (332) and Clear (335) in the raw feed — resolved
+        # from shadow state for Delete (see order size tracking block below).
         raw_price = int(raw_event["price"])
         price_fp  = raw_price * FIXED_PRICE_SCALE   # fixed-point int64
 
@@ -662,10 +720,49 @@ class HKEXAdapter(BaseAdapter):
         # ── order_id ──────────────────────────────────────────────────────────
         # For Clear (335) and COP (364): order_id = 0 (no associated order).
         # For Delete (332): order_id is the ID of the order being cancelled.
-        # For Trade (350): order_id is the aggressor order ID (0 if unavailable).
+        # For Trade (350): order_id is the PASSIVE resting order ID.
+        #   Per OMD-D spec §3.5: "users must reduce the resting order
+        #   identified by the 'Quantity' within the Trade (350) message."
+        #   order_id = 0 on combo leg trades (no resting order to decrement).
         order_id = int(raw_event["order_id"])
+        _key = (orderbook_id, order_id, side)  # side included — HKEX reuses order_id across sides (combo legs)
+        
+        # ── Order size + price shadow tracking (HKEX-specific) ───────────────
+        # _order_sizes maps order_id → (resting_size, price_fp).
+        #
+        # Why we track price:
+        #   DeleteOrder (332) carries price=0 AND quantity=0 in the raw feed.
+        #   The reconstruction engine's _book_cancel() looks up the price level
+        #   via book._get_level(price, side). With price=0 it finds no level and
+        #   returns silently — the phantom order stays in the book indefinitely,
+        #   eventually causing crossed spreads when the other side moves past it.
+        #   We resolve both fields from shadow state before building the event.
+        #
+        # Why we track size:
+        #   Same issue — with size=0 the delta subtraction is a no-op.
+        #
+        # Edge case: order_id absent from shadow on Delete/Trade.
+        #   Can happen if the session starts mid-carnet (truncated raw file) or
+        #   if a partial day's data is replayed. We log a warning and fall back
+        #   to (0, 0) — the resulting CANCEL will be a no-op rather than a crash.
+        if msg_type == 330:                          # AddOrder — register new resting order
+            self._order_sizes[_key] = (size, price_fp)
 
-        return {
+        elif msg_type == 331:                        # ModifyOrder (rare) — update both fields
+            self._order_sizes[_key] = (size, price_fp)
+
+        elif msg_type == 332:                        # DeleteOrder — full cancel, resolve from shadow
+            cached = self._order_sizes.pop(_key, None)
+            if cached is None:
+                # Order not seen in this session — stale cancel or truncated feed.
+                # Emit a no-op CANCEL (size=0, price=0) rather than crashing.
+                size     = 0
+                price_fp = 0
+            else:
+                size, price_fp = cached   # overwrite raw zeros with tracked values                                   
+
+        # ── Build the base normalized event ───────────────────────────────────
+        event = {
             # ── Timing ────────────────────────────────────────────────────────
             "ts_event"      : ts_event,
             "ts_recv"       : ts_recv,
@@ -692,6 +789,62 @@ class HKEXAdapter(BaseAdapter):
             "publisher_id"  : 0,            # HKEX is not a Databento publisher
             "instrument_id" : orderbook_id, # HKEX OrderbookID — stable per series
         }
+
+        if msg_type == 350 and order_id == 0:
+            """
+            logging.getLogger(__name__).warning(
+                "[info] Trade with OrderID = 0 skipped (contract=%s) (ts_event=%d)", info.contract, ts_event
+            )
+            """
+            return None   # combo leg trade — no resting order, price not meaningful for outright book
+
+        # ── Synthetic CANCEL for trades (see module docstring §10) ────────────
+        # When a Trade (350) has a non-zero order_id, the passive resting order
+        # must be decremented by the traded quantity. HKEX does not emit a
+        # separate fill or delete message for this — the Trade IS the signal.
+        # We synthesize a CANCEL event to let the reconstruction engine
+        # decrement the book correctly via its existing _book_cancel() logic.
+        #
+        # The synthetic CANCEL uses price_fp from the TRADE event itself (which
+        # equals the resting order's limit price), so no shadow lookup is needed
+        # here for price. We do update the shadow state to reflect the residual
+        # size in case a defensive Delete (332) arrives later.
+        if msg_type == 350 and order_id > 0:
+            synthetic_cancel = {
+                "ts_event"      : ts_event,
+                "ts_recv"       : ts_recv,
+                "venue"         : VENUE,
+                "product"       : info.product,
+                "contract"      : info.contract,
+                "action"        : Action.CANCEL,
+                "side"          : side,       # passive side (already mapped correctly)
+                "price"         : price_fp,   # trade price == resting order limit price
+                "size"          : size,       # quantity to subtract from resting order
+                "order_id"      : order_id,   # passive resting order to decrement
+                "flags"         : flags,
+                "sequence"      : sequence,
+                "publisher_id"  : 0,
+                "instrument_id" : orderbook_id,
+            }
+            self._n_synthetic_cancels += 1
+
+            # Update shadow state with residual size after partial fill.
+            # Preserve the cached price — it does not change between trades
+            # on the same resting order. If order_id is absent (truncated feed),
+            # we skip the update silently; the synthetic CANCEL still fires.
+            cached = self._order_sizes.get(_key)
+            if cached is not None:
+                cached_size, cached_price = cached
+                residual = max(0, cached_size - size)
+                if residual > 0:
+                    self._order_sizes[_key] = (residual, cached_price)
+                else:
+                    # Fully filled — remove from shadow state
+                    self._order_sizes.pop(_key, None)
+
+            return [event, synthetic_cancel]
+
+        return [event]
 
     # ─────────────────────────────────────────────────────────────────────────
     # Warmup boundary — not applicable for HKEX
@@ -721,11 +874,12 @@ class HKEXAdapter(BaseAdapter):
     def get_stats(self) -> dict:
         stats = super().get_stats()
         stats.update({
-            "venue"              : VENUE,
-            "n_instruments"      : len(self._ob_map),
-            "n_unknown_symbol"   : self._n_unknown_symbol,
-            "n_clears"           : self._n_clears,
-            "n_cops"             : self._n_cops,
-            "n_mod_orders"       : self._n_mod_orders,
+            "venue"                : VENUE,
+            "n_instruments"        : len(self._ob_map),
+            "n_unknown_symbol"     : self._n_unknown_symbol,
+            "n_clears"             : self._n_clears,
+            "n_cops"               : self._n_cops,
+            "n_mod_orders"         : self._n_mod_orders,
+            "n_synthetic_cancels"  : self._n_synthetic_cancels,
         })
         return stats
