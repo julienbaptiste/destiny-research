@@ -17,6 +17,7 @@ debugpy==1.8.20
 decorator==5.2.1
 duckdb==1.4.4
 executing==2.2.1
+fastjsonschema==2.21.2
 fastparquet==2025.12.0
 fonttools==4.61.1
 frozenlist==1.8.0
@@ -30,6 +31,8 @@ isort==8.0.1
 jedi==0.19.2
 jinja2==3.1.6
 joblib==1.5.3
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
 jupyter-black==0.4.0
 jupyter-client==8.8.0
 jupyter-core==5.9.1
@@ -40,6 +43,7 @@ matplotlib-inline==0.2.1
 multidict==6.7.1
 mypy-extensions==1.1.0
 narwhals==2.17.0
+nbformat==5.10.4
 nest-asyncio==1.6.0
 numpy==2.4.2
 packaging==26.0
@@ -69,7 +73,9 @@ python-dateutil==2.9.0.post0
 pytokens==0.4.1
 pytz==2026.1.post1
 pyzmq==27.1.0
+referencing==0.37.0
 requests==2.32.5
+rpds-py==0.30.0
 scikit-learn==1.8.0
 scipy==1.17.1
 seaborn==0.13.2
