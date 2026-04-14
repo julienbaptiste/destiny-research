@@ -205,11 +205,19 @@ _ORDER_SIDE_MAP: dict[int, str] = {
 }
 
 # Raw trade side (int8) → normalized Side string
-# Convention: trade side = Side of Orderbook ID
+# Trade side mapping for TRADE events (aggressor side)
+# For FILL and CANCEL events, we'll invert this to get passive side
 _TRADE_SIDE_MAP: dict[int, str] = {
     0: Side.NONE,
-    2: Side.BID,    # Buy order (passive) → BID side of book was consumed
-    3: Side.ASK,    # Sell order (passive) → ASK side of book was consumed
+    2: Side.ASK,    # Buy aggressor → sold into the ASK (hit resting sell)
+    3: Side.BID,    # Sell aggressor → bought from the BID (hit resting buy)
+}
+
+# Passive side mapping for FILL/CANCEL events (inverse of trade aggressor)
+_PASSIVE_SIDE_MAP: dict[int, str] = {
+    0: Side.NONE,
+    2: Side.BID,    # Buy order resting → BID side
+    3: Side.ASK,    # Sell order resting → ASK side
 }
 
 # Regex: HKEX futures symbol e.g. "HSIH6", "MHIG6", "HHIU6", "MCHZ6"
@@ -810,28 +818,51 @@ class HKEXAdapter(BaseAdapter):
         # here for price. We do update the shadow state to reflect the residual
         # size in case a defensive Delete (332) arrives later.
         if msg_type == 350 and order_id > 0:
-            synthetic_cancel = {
+            # Trade with resting order — emit TRADE + FILL + CANCEL
+            # to match Databento format (see Databento example lines 9-11)
+            
+            # Get passive side (resting order side)
+            passive_side = _PASSIVE_SIDE_MAP.get(raw_side, Side.NONE)
+            
+            # 1. FILL event (passive order consumed)
+            fill_event = {
+                "ts_event"      : ts_event,
+                "ts_recv"       : ts_recv,
+                "venue"         : VENUE,
+                "product"       : info.product,
+                "contract"      : info.contract,
+                "action"        : Action.FILL,
+                "side"          : passive_side,   # passive resting order side
+                "price"         : price_fp,
+                "size"          : size,
+                "order_id"      : order_id,       # passive resting order
+                "flags"         : 0,
+                "sequence"      : sequence,
+                "publisher_id"  : 0,
+                "instrument_id" : orderbook_id,
+            }
+            
+            # 2. CANCEL event (decrement passive order from book)
+            cancel_event = {
                 "ts_event"      : ts_event,
                 "ts_recv"       : ts_recv,
                 "venue"         : VENUE,
                 "product"       : info.product,
                 "contract"      : info.contract,
                 "action"        : Action.CANCEL,
-                "side"          : side,       # passive side (already mapped correctly)
-                "price"         : price_fp,   # trade price == resting order limit price
-                "size"          : size,       # quantity to subtract from resting order
-                "order_id"      : order_id,   # passive resting order to decrement
+                "side"          : passive_side,   # same as FILL
+                "price"         : price_fp,
+                "size"          : size,
+                "order_id"      : order_id,       # same as FILL
                 "flags"         : flags,
                 "sequence"      : sequence,
                 "publisher_id"  : 0,
                 "instrument_id" : orderbook_id,
             }
+            
             self._n_synthetic_cancels += 1
-
-            # Update shadow state with residual size after partial fill.
-            # Preserve the cached price — it does not change between trades
-            # on the same resting order. If order_id is absent (truncated feed),
-            # we skip the update silently; the synthetic CANCEL still fires.
+            
+            # Update shadow state with residual size after partial fill
             cached = self._order_sizes.get(_key)
             if cached is not None:
                 cached_size, cached_price = cached
@@ -841,8 +872,10 @@ class HKEXAdapter(BaseAdapter):
                 else:
                     # Fully filled — remove from shadow state
                     self._order_sizes.pop(_key, None)
-
-            return [event, synthetic_cancel]
+            
+            # Return all 3 events in order: TRADE (aggressor), FILL (passive), CANCEL (passive)
+            # Note: event['side'] has already been set to aggressor side via _TRADE_SIDE_MAP
+            return [event, fill_event, cancel_event]
 
         return [event]
 
