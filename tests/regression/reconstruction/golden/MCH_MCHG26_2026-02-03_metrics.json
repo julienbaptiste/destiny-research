@@ -3,27 +3,27 @@
   "contract": "MCHG26",
   "date": "2026-02-03",
   "pipeline_version": "reconstruction_v1",
-  "row_count": 1165156,
+  "row_count": 1155653,
   "action_distribution": {
     "ADD": 578220,
-    "CANCEL": 577355,
+    "CANCEL": 567778,
     "CLEAR": 4,
-    "TRADE": 9577
+    "TRADE": 9651
   },
   "side_distribution": {
-    "ASK": 531931,
-    "BID": 633221,
-    "NONE": 4
+    "ASK": 527651,
+    "BID": 627924,
+    "NONE": 78
   },
   "orphan_cancel": 0,
   "orphan_modify": 0,
-  "burst_rate": 0.016439,
-  "bid_px_min": 8929.0,
+  "burst_rate": 0.0,
+  "bid_px_min": 9063.0,
   "bid_px_max": 9190.0,
   "ask_px_min": 8930.0,
-  "ask_px_max": 9191.0,
+  "ask_px_max": 9162.0,
   "ts_event_min": 1770066427864000000,
   "ts_event_max": 1770145200049000000,
-  "sample_checksum_sha256": "9f1d7330bafdb6ae72ebe50af1471615ce4fb9f6ca11738efdadb5c326e54c51",
+  "sample_checksum_sha256": "76fb59494daa522a76a0c1c184e1b69bb7eb08d96d02f34560afd6218f7990b7",
   "sample_rows_used": 50000
 }
