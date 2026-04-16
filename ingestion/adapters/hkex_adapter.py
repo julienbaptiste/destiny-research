@@ -733,7 +733,17 @@ class HKEXAdapter(BaseAdapter):
         #   identified by the 'Quantity' within the Trade (350) message."
         #   order_id = 0 on combo leg trades (no resting order to decrement).
         order_id = int(raw_event["order_id"])
-        _key = (orderbook_id, order_id, side)  # side included — HKEX reuses order_id across sides (combo legs)
+
+        # WARNING: This was the cause of massive issues in LOB reconstruction
+        # Please be careful with side for next data providers when it is to
+        # adapt the data format to our agnostic data format.
+        if msg_type == 350:
+            # For trades, use passive side in the key (resting order side)
+            passive_side_for_key = _PASSIVE_SIDE_MAP.get(raw_side, Side.NONE)
+            _key = (orderbook_id, order_id, passive_side_for_key)
+        else:
+            _key = (orderbook_id, order_id, side)
+        
         
         # ── Order size + price shadow tracking (HKEX-specific) ───────────────
         # _order_sizes maps order_id → (resting_size, price_fp).
