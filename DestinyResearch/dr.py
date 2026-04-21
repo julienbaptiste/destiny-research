@@ -1013,9 +1013,9 @@ def get_contract_stats(
     dict with keys:
         contract, date, schema, session ('rth' if filtered, 'full' otherwise),
         n_rows, n_add, n_cancel, n_modify, n_trade, n_fill, n_clear,
-        cancel_rate   (n_cancel / n_add),
-        fill_rate     (n_trade / n_add),
-        order_to_trade_ratio  (n_add / n_trade),   ← renamed from 'otr' for clarity
+        cancel_rate   ((n_cancel - n_fill) / (n_add + n_modify)),
+        fill_rate     (n_fill / (n_add + n_modify)),
+        order_to_trade_ratio  ((n_add + n_modify) / n_fill),  # per Eurex regulation
         price_min, price_max, price_range_ticks,   (in fixed-point int64)
         price_min_pts, price_max_pts,              (in index points)
         tick_size_pts
@@ -1095,9 +1095,13 @@ def get_contract_stats(
      n_fill, n_clear, price_min, price_max) = row
 
     # Derived ratios — guard against division by zero
-    cancel_rate = (n_cancel / n_add)   if n_add   else None
-    fill_rate   = (n_trade  / n_add)   if n_add   else None
-    otr         = (n_add    / n_trade) if n_trade  else None
+    #   cancel_rate = (CANCEL - FILL) / (ADD + MODIFY)
+    #   fill_rate   = FILL / (ADD + MODIFY)
+    #   OTR         = (ADD + MODIFY) / FILL  (per Eurex regulation)
+    denominator = n_add + n_modify
+    cancel_rate = ((n_cancel - n_fill) / denominator) if denominator else None
+    fill_rate   = (n_fill / denominator)              if denominator else None
+    otr         = (denominator / n_fill)              if n_fill      else None  
 
     # Convert fixed-point prices to index points (divide by 1e9)
     price_min_pts = (price_min / 1e9) if price_min is not None else None
