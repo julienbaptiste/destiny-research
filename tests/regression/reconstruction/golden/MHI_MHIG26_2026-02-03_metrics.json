@@ -3,27 +3,28 @@
   "contract": "MHIG26",
   "date": "2026-02-03",
   "pipeline_version": "reconstruction_v1",
-  "row_count": 7037915,
+  "row_count": 6433999,
   "action_distribution": {
-    "ADD": 3466893,
-    "CANCEL": 3468906,
+    "ADD": 2862977,
+    "CANCEL": 2864990,
     "CLEAR": 4,
+    "MODIFY": 603916,
     "TRADE": 102112
   },
   "side_distribution": {
-    "ASK": 3751478,
-    "BID": 3286433,
+    "ASK": 3465305,
+    "BID": 2968690,
     "NONE": 4
   },
   "orphan_cancel": 0,
   "orphan_modify": 0,
-  "burst_rate": 0.029018,
+  "burst_rate": 0.031741,
   "bid_px_min": 26459.0,
   "bid_px_max": 27157.0,
   "ask_px_min": 26460.0,
   "ask_px_max": 27158.0,
   "ts_event_min": 1770066431753000000,
   "ts_event_max": 1770145200032000000,
-  "sample_checksum_sha256": "346de14c1f8ae76d88305ff784fc17de62e7522dfc9f711929ea5b1ce287b1f0",
+  "sample_checksum_sha256": "6c3da4c3a3f3acb96935617fc0ad84b66435b77d85697b758d68c79f44749690",
   "sample_rows_used": 50000
 }

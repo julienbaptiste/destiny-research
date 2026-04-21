@@ -3,23 +3,25 @@
   "contract": "MCHG26",
   "date": "2026-02-03",
   "pipeline_version": "normalization_v1",
-  "row_count": 1165156,
+  "row_count": 1138963,
   "action_distribution": {
-    "ADD": 578220,
-    "CANCEL": 577355,
+    "ADD": 542450,
+    "CANCEL": 541585,
     "CLEAR": 4,
+    "FILL": 9577,
+    "MODIFY": 35770,
     "TRADE": 9577
   },
   "side_distribution": {
-    "ASK": 531931,
-    "BID": 633221,
+    "ASK": 528358,
+    "BID": 610601,
     "NONE": 4
   },
   "price_min": 0,
   "price_max": 10087000000000,
   "ts_event_min": 1770066427864000000,
   "ts_event_max": 1770145200049000000,
-  "sample_checksum_sha256": "f225cb2bbd22ab59943ff4c5a4d00a894764f9df6fb6bc42ff33a0f753cdb22c",
+  "sample_checksum_sha256": "0c7d47572654d43abc5080cb83ec16560de4d6f3fb36387be2bfa27e45e8c912",
   "sample_rows_used": 50000,
   "rejected_count": 0,
   "warmup_skip_count": 0

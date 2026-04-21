@@ -3,23 +3,25 @@
   "contract": "HHIG26",
   "date": "2026-02-03",
   "pipeline_version": "normalization_v1",
-  "row_count": 3951576,
+  "row_count": 3742283,
   "action_distribution": {
-    "ADD": 1926691,
-    "CANCEL": 1938786,
+    "ADD": 1631303,
+    "CANCEL": 1643398,
     "CLEAR": 4,
+    "FILL": 86095,
+    "MODIFY": 295388,
     "TRADE": 86095
   },
   "side_distribution": {
-    "ASK": 1988362,
-    "BID": 1963210,
+    "ASK": 1893315,
+    "BID": 1848964,
     "NONE": 4
   },
   "price_min": 0,
   "price_max": 9700000000000,
   "ts_event_min": 1770066427858000000,
   "ts_event_max": 1770146145545000000,
-  "sample_checksum_sha256": "0314858be87628c99ade22dac2752f3326d96dca2d6abda99cd5c267cad8ac1b",
+  "sample_checksum_sha256": "6f435cfeb9f96061af4be7dc95d5df9fc4f64feb15fb7cb1a459f8b532c9dea9",
   "sample_rows_used": 50000,
   "rejected_count": 176,
   "warmup_skip_count": 0
