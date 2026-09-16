@@ -1,26 +1,9 @@
-"""
-tests/regression/shared/metrics_mbo.py
+"""Shared metrics for MBO normalization regression tests.
 
-Shared utilities for regression testing of the MBO normalization pipeline.
-
-Provides:
-  - Path resolution for normalized MBO Parquet files (new Hive convention)
-  - Metric extraction from normalized MBO outputs
-  - SHA-256 checksum on a deterministic row sample
-  - Golden file I/O (load / save JSON)
-  - Metric comparison with configurable tolerances
-  - Pipeline runner (subprocess wrapper around ingest.py CLI)
-  - Terminal colour helpers
-
-Metrics captured per product/day:
-  Exact (zero tolerance — deterministic on fixed input):
-    row_count, rejected_count, warmup_skip_count,
-    action_distribution, side_distribution,
-    price_min, price_max, ts_event_min, ts_event_max,
-    sample_checksum_sha256
-
-  Informational (not compared, stored for reference):
-    sample_rows_used
+The fast golden suite remains intentionally lightweight, while the R0 safety
+net adds a separate full-file semantic fingerprint. This module is responsible
+for exact day selection, bounded-memory metric extraction and deterministic
+legacy golden comparisons.
 """
 
 from __future__ import annotations
@@ -33,24 +16,17 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-# config.py lives at repo root — tests/regression/shared/ is 3 levels deep
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT))
-from config import DATA_NORMALIZED, REPO_ROOT  # noqa: E402
+from config import DATA_NORMALIZED, DATA_RAW, REPO_ROOT  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
-# Number of rows sampled for the SHA-256 checksum.
-# 50K rows is fast to read and highly discriminating for ordering/value regressions.
 SAMPLE_ROWS = 50_000
-
-# Columns used for the sample checksum — the columns most likely to regress
-# silently after a pipeline change (parsing, dedup, flag filtering).
+READ_BATCH_ROWS = 100_000
 CHECKSUM_COLS = [
     "ts_event",
     "ts_recv",
@@ -62,13 +38,12 @@ CHECKSUM_COLS = [
     "flags",
 ]
 
-# Metrics that must match EXACTLY.
-# All MBO metrics are deterministic on fixed input data (integer counts and
-# fixed-point prices — no floating-point arithmetic involved).
+# warmup_skip_count is deliberately not asserted here. The current pipeline
+# increments it only in ValidatorState and does not persist it to Parquet, so
+# historical golden values were synthetic zeros rather than observed data.
 EXACT_METRICS = [
     "row_count",
     "rejected_count",
-    "warmup_skip_count",
     "price_min",
     "price_max",
     "ts_event_min",
@@ -76,41 +51,21 @@ EXACT_METRICS = [
     "sample_checksum_sha256",
 ]
 
-# action_distribution and side_distribution are dicts — compared separately
-# in compare_metrics() with exact equality on each key.
-
-# ANSI colour codes for terminal output
-GREEN  = "\033[92m"
-RED    = "\033[91m"
+GREEN = "\033[92m"
+RED = "\033[91m"
 YELLOW = "\033[93m"
-RESET  = "\033[0m"
-BOLD   = "\033[1m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
 
 
-# ---------------------------------------------------------------------------
-# Path resolution — uses DATA_NORMALIZED from config.py
-# ---------------------------------------------------------------------------
-# data/normalized/provider=databento/venue=<VENUE>/product=<PRODUCT>/
-#     contract=<CONTRACT>/year=<Y>/month=<MM>/
-#     <CONTRACT>_<YYYYMMDD>_mbo.parquet
-#     <CONTRACT>_<YYYYMMDD>_rejected.parquet
-#
-# The contract (front month symbol) must be supplied by the caller —
-# it is not derivable from product + date without reading the instrument map.
-# For golden file purposes we hardcode the front month per product/date
-# in GOLDEN_CONFIG (generate_golden.py).
-# ---------------------------------------------------------------------------
-
-# Venue + provider mapping: product → (venue, provider)
-# Mirrors ingestion/market_config.py — extend here when adding HKEX products.
+# Storage provider is case-sensitive because it is part of the Hive path.
 _PRODUCT_VENUE: dict[str, tuple[str, str]] = {
-    "ES":   ("CME",   "databento"),
-    "NIY":  ("CME",   "databento"),
-    "NKD":  ("CME",   "databento"),
+    "ES": ("CME", "databento"),
+    "NIY": ("CME", "databento"),
+    "NKD": ("CME", "databento"),
     "FDAX": ("EUREX", "databento"),
     "FESX": ("EUREX", "databento"),
     "FSMI": ("EUREX", "databento"),
-    # HKEX products — add once hkex_adapter.py is implemented
     "HHI": ("HKEX", "HKEX"),
     "HSI": ("HKEX", "HKEX"),
     "MCH": ("HKEX", "HKEX"),
@@ -119,25 +74,10 @@ _PRODUCT_VENUE: dict[str, tuple[str, str]] = {
 
 
 def normalized_dir(product: str, contract: str, date_str: str) -> Path:
-    """Return the normalized Hive directory for a given product/contract/date.
-
-    Builds the path from DATA_NORMALIZED (config.py) — no repo_root needed.
-
-    Args:
-        product:  product ticker (e.g. 'ES', 'FDAX').
-        contract: front-month contract symbol (e.g. 'ESZ25', 'FDAXM25').
-        date_str: ISO date string 'YYYY-MM-DD'.
-
-    Returns:
-        Absolute Path to the directory containing the normalized Parquet files.
-
-    Raises:
-        ValueError: if product is not in _PRODUCT_VENUE.
-    """
+    """Return the normalized Hive directory for one contract/day."""
     if product not in _PRODUCT_VENUE:
         raise ValueError(
-            f"Unknown product '{product}'. "
-            f"Add it to _PRODUCT_VENUE in metrics_mbo.py."
+            f"Unknown product '{product}'. Add it to _PRODUCT_VENUE in metrics_mbo.py."
         )
     venue, provider = _PRODUCT_VENUE[product]
     d = date.fromisoformat(date_str)
@@ -153,63 +93,84 @@ def normalized_dir(product: str, contract: str, date_str: str) -> Path:
 
 
 def mbo_path(product: str, contract: str, date_str: str) -> Path:
-    """Return the absolute path to the normalized MBO Parquet file for one day."""
+    """Return the normalized MBO Parquet path for one day."""
     tag = date_str.replace("-", "")
     return normalized_dir(product, contract, date_str) / f"{contract}_{tag}_mbo.parquet"
 
 
 def rejected_path(product: str, contract: str, date_str: str) -> Path:
-    """Return the absolute path to the rejected events Parquet file for one day."""
+    """Return the rejected-event Parquet path for one day."""
     tag = date_str.replace("-", "")
     return normalized_dir(product, contract, date_str) / f"{contract}_{tag}_rejected.parquet"
 
 
-# ---------------------------------------------------------------------------
-# Pipeline runner
-# ---------------------------------------------------------------------------
+def _raw_databento_file(product: str, venue: str, provider: str, date_str: str) -> Path | None:
+    """Resolve exactly one Databento raw MBO file for the requested golden day."""
+    tag = date_str.replace("-", "")
+    root = DATA_RAW / f"provider={provider}" / f"venue={venue}" / f"product={product}"
+    if not root.exists():
+        return None
+
+    matches = sorted(root.rglob(f"*{tag}*.mbo.dbn.zst"))
+    if len(matches) != 1:
+        if len(matches) > 1:
+            print(
+                f"  {RED}[ERROR]{RESET} expected one raw file for {product} {date_str}, "
+                f"found {len(matches)}: {matches}",
+                file=sys.stderr,
+            )
+        return None
+    return matches[0]
+
 
 def run_pipeline(product: str, date_str: str) -> bool:
-    """Run ingest.py batch for one product/day via subprocess.
+    """Re-run normalization for exactly the requested regression day.
 
-    Calls: python ingestion/ingest.py batch --provider databento
-               --venue <VENUE> --product <PRODUCT>
-               (--overwrite=False by default — existing outputs are skipped)
-
-    For regression testing we assume the normalized file for date_str already
-    exists on disk. Use --skip-pipeline in generate_golden.py / check_regression.py
-    to skip this step entirely.
-
-    Args:
-        product:  product ticker.
-        date_str: ISO date string (used for display only).
-
-    Returns:
-        True on success (exit code 0), False otherwise.
+    This intentionally avoids the old behavior where a 'deep' check invoked a
+    full product batch and often skipped existing outputs. Only the golden day
+    is overwritten.
     """
     if product not in _PRODUCT_VENUE:
         print(f"  {RED}[ERROR]{RESET} Unknown product '{product}'", file=sys.stderr)
         return False
 
-    venue, provider = _PRODUCT_VENUE[product]
-    if provider == "hkex":
-        # HKEX uses its own subcommand with --date instead of batch
+    venue, storage_provider = _PRODUCT_VENUE[product]
+    provider_cli = storage_provider.lower()
+
+    if provider_cli == "hkex":
         cmd = [
             sys.executable,
-            "-m", "ingestion.ingest",
+            "-m",
+            "ingestion.ingest",
             "hkex",
-            "--product", product,
-            "--date",    date_str,
-            "--mode",    "LOOSE",
+            "--product",
+            product,
+            "--date",
+            date_str,
+            "--mode",
+            "LOOSE",
+            "--overwrite",
         ]
     else:
+        raw_path = _raw_databento_file(product, venue, storage_provider, date_str)
+        if raw_path is None:
+            print(
+                f"  {RED}[ERROR]{RESET} raw Databento MBO file not uniquely resolved "
+                f"for {product} {date_str}",
+                file=sys.stderr,
+            )
+            return False
         cmd = [
             sys.executable,
-            "-m", "ingestion.ingest",
-            "batch",
-            "--provider", provider,
-            "--venue",    venue,
-            "--product",  product,
+            "-m",
+            "ingestion.ingest",
+            "file",
+            str(raw_path),
+            "--mode",
+            "STRICT",
+            "--overwrite",
         ]
+
     print(f"  [pipeline] {product} {date_str} ...", flush=True)
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(REPO_ROOT))
     if result.returncode != 0:
@@ -219,40 +180,32 @@ def run_pipeline(product: str, date_str: str) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Checksum
-# ---------------------------------------------------------------------------
-
-def sha256_table_sample(table, n_rows: int, cols: list[str]) -> str:
-    """Compute a SHA-256 fingerprint over the first n_rows of selected columns.
-
-    Hashes the Python repr of each column's value list — deterministic and
-    sensitive to both value changes and row-ordering changes (e.g. a missing
-    ORDER BY in the pipeline would be caught immediately).
-
-    Args:
-        table:  PyArrow Table.
-        n_rows: number of rows to sample from the start of the table.
-        cols:   column names to include in the hash.
-
-    Returns:
-        Lowercase hex SHA-256 digest string.
-    """
+def sha256_table_sample(table: pa.Table, n_rows: int, cols: list[str]) -> str:
+    """Hash the first ``n_rows`` of selected columns for the fast golden check."""
     h = hashlib.sha256()
     actual_rows = min(n_rows, len(table))
     sliced = table.slice(0, actual_rows)
     for col in cols:
         if col not in sliced.schema.names:
-            # Column may not exist for all products (e.g. sequence on HKEX)
             continue
-        # repr of Python list is deterministic for int/str/None types
-        h.update(repr(sliced.column(col).to_pylist()).encode())
+        arr = sliced.column(col)
+        if pa.types.is_dictionary(arr.type):
+            arr = arr.cast(pa.string())
+        h.update(repr(arr.to_pylist()).encode())
     return h.hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Metric extraction
-# ---------------------------------------------------------------------------
+def _update_min(current: int | None, candidate: int | None) -> int | None:
+    if candidate is None:
+        return current
+    return candidate if current is None else min(current, candidate)
+
+
+def _update_max(current: int | None, candidate: int | None) -> int | None:
+    if candidate is None:
+        return current
+    return candidate if current is None else max(current, candidate)
+
 
 def extract_metrics(
     product: str,
@@ -260,113 +213,111 @@ def extract_metrics(
     date_str: str,
     pipeline_version: str = "unknown",
 ) -> dict[str, Any]:
-    """Extract the statistical fingerprint from normalized MBO outputs for one day.
-
-    Reads the MBO Parquet file and the rejected Parquet file (if present).
-    Paths are resolved via DATA_NORMALIZED from config.py.
-    Returns a dict suitable for JSON serialisation and golden file comparison.
-
-    All metrics are deterministic on fixed input data:
-      - Integer counts (row_count, rejected_count, warmup_skip_count)
-      - Action/side distributions (dict of string → int)
-      - Fixed-point price bounds (int64)
-      - Timestamp bounds (uint64 nanoseconds)
-      - SHA-256 checksum over first SAMPLE_ROWS rows
-
-    Args:
-        product:          product ticker (e.g. 'ES').
-        contract:         front-month contract symbol (e.g. 'ESZ25').
-        date_str:         ISO date string 'YYYY-MM-DD'.
-        pipeline_version: version tag — bump manually after intentional breaking changes.
-
-    Returns:
-        Dict with all metrics. Missing files are recorded as None rather than raising.
-    """
+    """Extract deterministic MBO metrics in bounded Arrow batches."""
     metrics: dict[str, Any] = {
-        "product":          product,
-        "contract":         contract,
-        "date":             date_str,
+        "product": product,
+        "contract": contract,
+        "date": date_str,
         "pipeline_version": pipeline_version,
     }
 
-    # --- MBO normalized file ---
     mbo_p = mbo_path(product, contract, date_str)
     if not mbo_p.exists():
-        # Record missing file — check_regression.py will report setup error
         metrics["row_count"] = None
         return metrics
 
-    tbl = pq.ParquetFile(mbo_p).read()
-    metrics["row_count"] = len(tbl)
+    parquet = pq.ParquetFile(mbo_p)
+    metrics["row_count"] = parquet.metadata.num_rows
 
-    # Action distribution — exact count per action value
-    # Expected keys: ADD, CANCEL, MODIFY, TRADE, FILL, CLEAR, NONE
-    if "action" in tbl.schema.names:
-        actions = tbl.column("action").to_pylist()
-        dist: dict[str, int] = {}
-        for a in actions:
-            if a is not None:
-                dist[a] = dist.get(a, 0) + 1
-        # Sort by key for deterministic JSON serialisation
-        metrics["action_distribution"] = dict(sorted(dist.items()))
+    action_dist: dict[str, int] = {}
+    side_dist: dict[str, int] = {}
+    price_min: int | None = None
+    price_max: int | None = None
+    ts_min: int | None = None
+    ts_max: int | None = None
+    sample_parts: list[pa.RecordBatch] = []
+    sample_rows = 0
 
-    # Side distribution — BID / ASK / NONE
-    if "side" in tbl.schema.names:
-        sides = tbl.column("side").to_pylist()
-        sdist: dict[str, int] = {}
-        for s in sides:
-            if s is not None:
-                sdist[s] = sdist.get(s, 0) + 1
-        metrics["side_distribution"] = dict(sorted(sdist.items()))
+    columns = [
+        "ts_event",
+        "ts_recv",
+        "action",
+        "side",
+        "price",
+        "size",
+        "order_id",
+        "flags",
+    ]
 
-    # Price bounds (fixed-point int64) — excludes sentinel INT64_MAX
-    if "price" in tbl.schema.names:
-        INT64_MAX = 9_223_372_036_854_775_807
-        price_col = tbl.column("price")
-        # Filter out sentinel prices before computing bounds
-        valid_mask = pc.not_equal(price_col, INT64_MAX)
-        valid_prices = price_col.filter(valid_mask)
-        if len(valid_prices) > 0:
-            metrics["price_min"] = pc.min(valid_prices).as_py()
-            metrics["price_max"] = pc.max(valid_prices).as_py()
+    for batch in parquet.iter_batches(batch_size=READ_BATCH_ROWS, columns=columns):
+        action_arr = batch.column(batch.schema.get_field_index("action"))
+        side_arr = batch.column(batch.schema.get_field_index("side"))
+        if pa.types.is_dictionary(action_arr.type):
+            action_arr = action_arr.cast(pa.string())
+        if pa.types.is_dictionary(side_arr.type):
+            side_arr = side_arr.cast(pa.string())
 
-    # Timestamp bounds (uint64 nanoseconds UTC)
-    if "ts_event" in tbl.schema.names:
-        ts_col = tbl.column("ts_event")
-        metrics["ts_event_min"] = pc.min(ts_col).as_py()
-        metrics["ts_event_max"] = pc.max(ts_col).as_py()
+        for action in action_arr.to_pylist():
+            if action is not None:
+                action_dist[action] = action_dist.get(action, 0) + 1
+        for side in side_arr.to_pylist():
+            if side is not None:
+                side_dist[side] = side_dist.get(side, 0) + 1
 
-    # SHA-256 checksum on first SAMPLE_ROWS rows of critical columns
-    metrics["sample_checksum_sha256"] = sha256_table_sample(tbl, SAMPLE_ROWS, CHECKSUM_COLS)
-    metrics["sample_rows_used"] = min(SAMPLE_ROWS, len(tbl))  # informational only
+        price_arr = batch.column(batch.schema.get_field_index("price"))
+        valid_prices = price_arr.filter(pc.not_equal(price_arr, 9_223_372_036_854_775_807))
+        if len(valid_prices):
+            price_min = _update_min(price_min, pc.min(valid_prices).as_py())
+            price_max = _update_max(price_max, pc.max(valid_prices).as_py())
 
-    del tbl
+        ts_arr = batch.column(batch.schema.get_field_index("ts_event"))
+        ts_min = _update_min(ts_min, pc.min(ts_arr).as_py())
+        ts_max = _update_max(ts_max, pc.max(ts_arr).as_py())
 
-    # --- Rejected file ---
+        if sample_rows < SAMPLE_ROWS:
+            take = min(SAMPLE_ROWS - sample_rows, len(batch))
+            sample_parts.append(batch.slice(0, take))
+            sample_rows += take
+
+    metrics["action_distribution"] = dict(sorted(action_dist.items()))
+    metrics["side_distribution"] = dict(sorted(side_dist.items()))
+    metrics["price_min"] = price_min
+    metrics["price_max"] = price_max
+    metrics["ts_event_min"] = ts_min
+    metrics["ts_event_max"] = ts_max
+
+    if sample_parts:
+        sample_table = pa.Table.from_batches(sample_parts)
+        metrics["sample_checksum_sha256"] = sha256_table_sample(
+            sample_table, SAMPLE_ROWS, CHECKSUM_COLS
+        )
+        metrics["sample_rows_used"] = len(sample_table)
+    else:
+        metrics["sample_checksum_sha256"] = hashlib.sha256(b"").hexdigest()
+        metrics["sample_rows_used"] = 0
+
     rej_p = rejected_path(product, contract, date_str)
     if rej_p.exists():
-        rej_tbl = pq.ParquetFile(rej_p).read()
-        metrics["rejected_count"] = len(rej_tbl)
-
-        # warmup_skip_count: rows with reason == 'warmup_skip' (GTC orphan CANCELs)
-        if "reason" in rej_tbl.schema.names:
-            reasons = rej_tbl.column("reason").to_pylist()
-            metrics["warmup_skip_count"] = sum(1 for r in reasons if r == "warmup_skip")
-        else:
-            metrics["warmup_skip_count"] = 0
-
-        del rej_tbl
+        rejected = pq.ParquetFile(rej_p)
+        metrics["rejected_count"] = rejected.metadata.num_rows
+        reason_dist: dict[str, int] = {}
+        if "reject_reason" in rejected.schema_arrow.names:
+            for batch in rejected.iter_batches(
+                batch_size=READ_BATCH_ROWS, columns=["reject_reason"]
+            ):
+                for reason in batch.column(0).to_pylist():
+                    if reason is not None:
+                        reason_dist[reason] = reason_dist.get(reason, 0) + 1
+        metrics["reject_reason_distribution"] = dict(sorted(reason_dist.items()))
     else:
-        # No rejected file means 0 rejections (ES case — fully clean)
         metrics["rejected_count"] = 0
-        metrics["warmup_skip_count"] = 0
+        metrics["reject_reason_distribution"] = {}
 
+    # Not currently persisted by ingestion; explicitly mark unavailable rather
+    # than manufacturing the historical zero that previously looked authoritative.
+    metrics["warmup_skip_count"] = None
     return metrics
 
-
-# ---------------------------------------------------------------------------
-# Golden file I/O
-# ---------------------------------------------------------------------------
 
 def save_golden(
     metrics: dict[str, Any],
@@ -375,15 +326,11 @@ def save_golden(
     contract: str,
     date_str: str,
 ) -> Path:
-    """Write metrics dict as a JSON golden file. Returns the path written.
-
-    Filename convention: <PRODUCT>_<CONTRACT>_<DATE>_metrics.json
-    e.g. ES_ESZ25_2025-10-01_metrics.json
-    """
+    """Write a golden JSON file and return its path."""
     golden_dir.mkdir(parents=True, exist_ok=True)
     out_path = golden_dir / f"{product}_{contract}_{date_str}_metrics.json"
-    with open(out_path, "w") as f:
-        json.dump(metrics, f, indent=2)
+    with out_path.open("w") as fh:
+        json.dump(metrics, fh, indent=2)
     return out_path
 
 
@@ -393,93 +340,61 @@ def load_golden(
     contract: str,
     date_str: str,
 ) -> dict[str, Any] | None:
-    """Load golden JSON for one product/contract/day. Returns None if not found."""
+    """Load one golden JSON file."""
     path = golden_dir / f"{product}_{contract}_{date_str}_metrics.json"
     if not path.exists():
         return None
-    with open(path) as f:
-        return json.load(f)
+    with path.open() as fh:
+        return json.load(fh)
 
-
-# ---------------------------------------------------------------------------
-# Metric comparison
-# ---------------------------------------------------------------------------
 
 def compare_metrics(
     golden: dict[str, Any],
     current: dict[str, Any],
     verbose: bool = False,
 ) -> list[str]:
-    """Compare current metrics against golden reference.
-
-    Returns a list of failure message strings.
-    An empty list means all checks passed.
-
-    Handles:
-      - Scalar exact metrics (EXACT_METRICS list)
-      - Dict metrics: action_distribution, side_distribution (key-by-key exact)
-
-    Args:
-        golden:  reference metrics loaded from golden JSON.
-        current: metrics extracted from current pipeline outputs.
-        verbose: if True, also print passing metrics to stdout.
-
-    Returns:
-        List of human-readable failure strings (empty = all passed).
-    """
+    """Compare deterministic scalar/distribution metrics against a golden."""
     failures: list[str] = []
-    passed:   list[str] = []
+    passed: list[str] = []
 
-    # --- scalar exact metrics ---
     for key in EXACT_METRICS:
         g_val = golden.get(key)
         c_val = current.get(key)
-
         if g_val is None and c_val is None:
-            continue  # metric not applicable for this product/day
+            continue
         if g_val is None or c_val is None:
-            failures.append(
-                f"{key}: golden={g_val}  current={c_val}  [one side missing]"
-            )
+            failures.append(f"{key}: golden={g_val} current={c_val} [one side missing]")
             continue
         if g_val != c_val:
-            failures.append(
-                f"{key}: golden={g_val}  current={c_val}  [EXACT MISMATCH]"
-            )
+            failures.append(f"{key}: golden={g_val} current={c_val} [EXACT MISMATCH]")
         else:
-            passed.append(f"{key}: {c_val}  ✓")
+            passed.append(f"{key}: {c_val} ✓")
 
-    # --- dict metrics: action_distribution, side_distribution ---
     for dict_key in ("action_distribution", "side_distribution"):
         g_dict = golden.get(dict_key)
         c_dict = current.get(dict_key)
-
         if g_dict is None and c_dict is None:
             continue
         if g_dict is None or c_dict is None:
             failures.append(
-                f"{dict_key}: golden={g_dict}  current={c_dict}  [one side missing]"
+                f"{dict_key}: golden={g_dict} current={c_dict} [one side missing]"
             )
             continue
 
-        # Check all keys present in golden exist in current with exact counts
-        all_keys = sorted(set(g_dict) | set(c_dict))
         dict_ok = True
-        for k in all_keys:
-            g_v = g_dict.get(k, 0)
-            c_v = c_dict.get(k, 0)
-            if g_v != c_v:
+        for key in sorted(set(g_dict) | set(c_dict)):
+            g_val = g_dict.get(key, 0)
+            c_val = c_dict.get(key, 0)
+            if g_val != c_val:
                 failures.append(
-                    f"{dict_key}[{k}]: golden={g_v}  current={c_v}  [EXACT MISMATCH]"
+                    f"{dict_key}[{key}]: golden={g_val} current={c_val} [EXACT MISMATCH]"
                 )
                 dict_ok = False
-
         if dict_ok:
-            total = sum(g_dict.values())
-            passed.append(f"{dict_key}: {dict(g_dict)}  total={total}  ✓")
+            passed.append(f"{dict_key}: {dict(g_dict)} total={sum(g_dict.values())} ✓")
 
     if verbose:
-        for p in passed:
-            print(f"    {GREEN}{p}{RESET}")
+        for message in passed:
+            print(f"    {GREEN}{message}{RESET}")
 
     return failures
