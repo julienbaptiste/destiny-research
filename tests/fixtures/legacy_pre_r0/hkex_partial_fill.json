@@ -1,0 +1,53 @@
+{
+  "name": "hkex_partial_fill_pre_r0",
+  "status": "LEGACY_CHARACTERIZATION",
+  "description": "Synthetic AddOrder followed by Trade(350). Freezes the pre-R0 normalized expansion and shadow residual; it is not a normative semantic specification.",
+  "contract": {
+    "orderbook_id": 135335842,
+    "product": "HSI",
+    "contract": "HSIG26",
+    "currency": "HKD",
+    "tick_size_fp": 1000000000
+  },
+  "raw_events": [
+    {
+      "source": "order",
+      "msg_type": 330,
+      "orderbook_id": 135335842,
+      "symbol": "HSIG6",
+      "class_code": "HSI",
+      "order_id": 8108676166385258219,
+      "price": 27079,
+      "quantity": 5,
+      "side": 0,
+      "send_time_ns": 1769995480741000000,
+      "seq_num": 4101677,
+      "msg_index": 0
+    },
+    {
+      "source": "trade",
+      "msg_type": 350,
+      "orderbook_id": 135335842,
+      "symbol": "HSIG6",
+      "class_code": "HSI",
+      "order_id": 8108676166385258219,
+      "price": 27079,
+      "quantity": 2,
+      "side": 2,
+      "send_time_ns": 1769995480751000000,
+      "seq_num": 4101687,
+      "msg_index": 0,
+      "trade_time_ns": 0,
+      "trade_id": 999,
+      "deal_type": 0,
+      "combo_group_id": 0
+    }
+  ],
+  "expected_pre_r0": {
+    "trade_actions": ["TRADE", "FILL", "CANCEL"],
+    "trade_sides": ["ASK", "BID", "BID"],
+    "trade_flags": [132, 0, 132],
+    "passive_order_residual_size": 3,
+    "passive_order_price_fp": 27079000000000
+  }
+}
