@@ -73,7 +73,7 @@ def main() -> int:
             ],
         ),
         (
-            "Safety-net detector, classification and failure-atomicity self-tests",
+            "Safety-net detector, classification, golden-contract and failure-atomicity self-tests",
             [
                 sys.executable,
                 "-m",
@@ -82,6 +82,7 @@ def main() -> int:
                 "tests/safety_net/test_canary_helpers.py",
                 "tests/safety_net/test_diff_outputs.py",
                 "tests/safety_net/test_candidate_classifications.py",
+                "tests/safety_net/test_corrected_golden_contract.py",
                 "tests/safety_net/test_ingest_atomicity.py",
                 "-v",
             ],
