@@ -135,6 +135,14 @@ def _expand_static_fields(case: dict[str, Any], row: dict[str, Any]) -> dict[str
     return expanded
 
 
+def _sparse_expected_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize authored values without adding constraints to future targets."""
+    sparse = dict(row)
+    if "norm_flags" in sparse:
+        sparse["norm_flags"] = _norm_flags_value(sparse["norm_flags"])
+    return sparse
+
+
 def _assign_expected_subsequences(rows: list[dict[str, Any]]) -> None:
     """Fill omitted expected subsequences in stable row order per sequence."""
     next_by_sequence: dict[int, int] = {}
@@ -336,40 +344,50 @@ def execute_fixture(
 
 
 def expected_fixture_result(case: dict[str, Any]) -> dict[str, Any]:
-    """Expand fixture shorthand into comparison-ready expectation values."""
+    """Expand exact legacy expectations while keeping future targets sparse."""
     expected = case["expected"]
+    is_baseline = bool(case["baseline_compatible"])
     default_norm_flags = (
         int(NormFlags.N_COARSE_TS) if case["provider"] == "hkex" else 0
     )
 
-    adapter_events = [
-        _expand_static_fields(case, row) for row in expected["adapter_events"]
-    ]
-    _assign_expected_subsequences(adapter_events)
-    for row in adapter_events:
-        row.setdefault("norm_flags", default_norm_flags)
+    if is_baseline:
+        adapter_events = [
+            _expand_static_fields(case, row) for row in expected["adapter_events"]
+        ]
+        _assign_expected_subsequences(adapter_events)
+        for row in adapter_events:
+            row.setdefault("norm_flags", default_norm_flags)
+    else:
+        adapter_events = [
+            _sparse_expected_row(row) for row in expected["adapter_events"]
+        ]
 
     if expected.get("clean_equals_adapter", False):
         clean_events = [dict(row) for row in adapter_events]
-    else:
+    elif is_baseline:
         clean_events = [
             _expand_static_fields(case, row) for row in expected.get("clean_events", [])
         ]
         _assign_expected_subsequences(clean_events)
         for row in clean_events:
             row.setdefault("norm_flags", default_norm_flags)
+    else:
+        clean_events = [
+            _sparse_expected_row(row) for row in expected.get("clean_events", [])
+        ]
 
-    # MBP1 carries the final normalized row's sequence/subsequence. Fill a
-    # missing subsequence from the last clean F_LAST row sharing that sequence.
     mbp1_rows = [dict(row) for row in expected["mbp1_rows"]]
-    final_by_sequence: dict[int, int] = {}
-    for row in clean_events:
-        if "sequence" in row and "subsequence" in row:
-            if int(row.get("flags", 0)) & int(Flags.F_LAST):
-                final_by_sequence[int(row["sequence"])] = int(row["subsequence"])
-    for row in mbp1_rows:
-        if "sequence" in row and "subsequence" not in row:
-            row["subsequence"] = final_by_sequence.get(int(row["sequence"]), 0)
+    if is_baseline:
+        # Exact legacy fixtures carry the final normalized row's subsequence.
+        final_by_sequence: dict[int, int] = {}
+        for row in clean_events:
+            if "sequence" in row and "subsequence" in row:
+                if int(row.get("flags", 0)) & int(Flags.F_LAST):
+                    final_by_sequence[int(row["sequence"])] = int(row["subsequence"])
+        for row in mbp1_rows:
+            if "sequence" in row and "subsequence" not in row:
+                row["subsequence"] = final_by_sequence.get(int(row["sequence"]), 0)
 
     return {
         "adapter_events": adapter_events,
