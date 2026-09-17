@@ -338,13 +338,16 @@ def execute_fixture(
 def expected_fixture_result(case: dict[str, Any]) -> dict[str, Any]:
     """Expand fixture shorthand into comparison-ready expectation values."""
     expected = case["expected"]
+    default_norm_flags = (
+        int(NormFlags.N_COARSE_TS) if case["provider"] == "hkex" else 0
+    )
 
     adapter_events = [
         _expand_static_fields(case, row) for row in expected["adapter_events"]
     ]
     _assign_expected_subsequences(adapter_events)
     for row in adapter_events:
-        row.setdefault("norm_flags", 0)
+        row.setdefault("norm_flags", default_norm_flags)
 
     if expected.get("clean_equals_adapter", False):
         clean_events = [dict(row) for row in adapter_events]
@@ -354,7 +357,7 @@ def expected_fixture_result(case: dict[str, Any]) -> dict[str, Any]:
         ]
         _assign_expected_subsequences(clean_events)
         for row in clean_events:
-            row.setdefault("norm_flags", 0)
+            row.setdefault("norm_flags", default_norm_flags)
 
     # MBP1 carries the final normalized row's sequence/subsequence. Fill a
     # missing subsequence from the last clean F_LAST row sharing that sequence.
