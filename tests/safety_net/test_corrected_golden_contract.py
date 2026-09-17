@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from freeze_corrected_goldens import (
     MBO_CHECKSUM_COLS,
     MBP1_CHECKSUM_COLS,
@@ -24,5 +22,5 @@ def test_corrected_goldens_live_outside_legacy_golden_directories():
     expected = _REPO_ROOT / "tests" / "regression" / "corrected" / "r0_1_r0_2"
     assert _DEFAULT_OUTPUT_ROOT == expected
     assert _GOLDEN_NAMESPACE == "corrected/r0_1_r0_2"
-    assert Path("normalization/golden") not in _DEFAULT_OUTPUT_ROOT.parents
-    assert Path("reconstruction/golden") not in _DEFAULT_OUTPUT_ROOT.parents
+    assert "/normalization/golden/" not in f"{_DEFAULT_OUTPUT_ROOT}/"
+    assert "/reconstruction/golden/" not in f"{_DEFAULT_OUTPUT_ROOT}/"
