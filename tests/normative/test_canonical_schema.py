@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import date
+
+import ingestion.adapters.databento_adapter as databento_module
 from ingestion import market_config
+from ingestion.adapters.base import ContractInfo, SessionConfig
+from ingestion.adapters.databento_adapter import DatabentoAdapter
 from ingestion.schema import Flags, NormFlags, NORMALIZED_MBO_SCHEMA, REJECTED_EVENTS_SCHEMA
+
+
+class _FixtureMBOMsg:
+    """Minimal attribute-based Databento message stand-in for adapter tests."""
+
+    def __init__(self, **values: object) -> None:
+        self.__dict__.update(values)
 
 
 def test_canonical_provider_flag_assignments() -> None:
@@ -20,6 +32,40 @@ def test_canonical_provider_flag_assignments() -> None:
     for flag in Flags:
         provider_mask |= int(flag)
     assert provider_mask & 0x01 == 0
+
+
+def test_databento_reserved_provider_bit_is_preserved(monkeypatch) -> None:
+    """Representation normalization must not erase an upstream reserved bit."""
+    adapter = DatabentoAdapter()
+    adapter._config = SessionConfig(session_date=date(2025, 10, 1))
+    adapter._venue = "CME"
+    adapter._contract_cache[1001] = ContractInfo(
+        product="ES",
+        contract="ESZ25",
+        venue="CME",
+        instrument_id=1001,
+    )
+    monkeypatch.setattr(databento_module.db, "MBOMsg", _FixtureMBOMsg)
+
+    event = adapter.translate(
+        _FixtureMBOMsg(
+            ts_event=1_759_276_800_000_000_001,
+            ts_recv=1_759_276_800_000_000_101,
+            action="A",
+            side="B",
+            price=4_500_250_000_000,
+            size=5,
+            order_id=101,
+            flags=0x89,  # F_LAST | F_BAD_TS_RECV | upstream reserved bit 0x01
+            sequence=1,
+            publisher_id=1,
+            instrument_id=1001,
+        )
+    )
+
+    assert event is not None
+    assert event["flags"] == 0x89
+    assert event["norm_flags"] == 0
 
 
 def test_normalization_provenance_bits_are_unique_and_bounded() -> None:
