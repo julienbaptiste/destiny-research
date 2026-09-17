@@ -2,7 +2,7 @@
 
 This command does not rerun paid-data pipelines. It validates the runtime,
 fingerprint detector, canary provenance helpers, differential runner, normative
-synthetic fixtures, legacy HKEX characterization and existing fast regression
+synthetic fixtures, pre-R0 legacy characterization and existing fast regression
 goldens against outputs already present on disk.
 """
 
@@ -75,15 +75,17 @@ def main() -> int:
             ],
         ),
         (
-            "HKEX pre-R0 characterization",
+            "Pre-R0 legacy characterization",
             [
                 sys.executable,
                 "-m",
                 "pytest",
+                "tests/characterization/test_databento_pre_r0.py",
                 "tests/test_hkex_synthetic_cancel.py",
                 "tests/characterization/test_hkex_pre_r0.py",
                 "tests/characterization/test_hkex_legacy_fixture.py",
                 "tests/characterization/test_hkex_reconstruction_pre_r0.py",
+                "tests/characterization/test_hkex_postprocess_pre_r0.py",
                 "-v",
             ],
         ),
