@@ -127,6 +127,15 @@ def _generate_diffs(work_root: Path, product: str) -> dict[str, object]:
     return result
 
 
+def _diffs_have_required_evidence(diffs: dict[str, object]) -> bool:
+    """Require both legacy MBO and MBP1 references for a qualification product."""
+    return all(
+        isinstance(diffs.get(kind), dict)
+        and diffs[kind].get("status") not in {"NO_REFERENCE", "NO_CANDIDATE"}
+        for kind in ("mbo", "mbp1")
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run R0.1/R0.2 preflight, canaries and migration differentials."
@@ -200,8 +209,15 @@ def main() -> int:
             }
             continue
 
+        evidence_complete = _diffs_have_required_evidence(diffs)
+        if not evidence_complete:
+            failures += 1
         summary["canaries"][product] = {
-            "status": "PASS_WITH_UNCLASSIFIED_DIFFS",
+            "status": (
+                "PASS_WITH_UNCLASSIFIED_DIFFS"
+                if evidence_complete
+                else "INCOMPLETE_DIFFERENTIAL_EVIDENCE"
+            ),
             "diffs": diffs,
         }
         print(f"\n=== {product} migration differential ===")
@@ -217,7 +233,7 @@ def main() -> int:
     print(f"\nQualification summary: {summary_path}")
 
     if failures:
-        print(f"Candidate qualification encountered {failures} execution failure(s).")
+        print(f"Candidate qualification encountered {failures} execution/evidence failure(s).")
         return 1
 
     print("Candidate qualification execution PASSED.")
