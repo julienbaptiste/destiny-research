@@ -4,6 +4,10 @@ The fast suite keeps the historical 50k-row sample checksum, while the R0
 safety net performs a separate full-file fingerprint. Metric extraction here is
 bounded-memory and no longer pretends that orphan counters are observable when
 they are not persisted by the reconstruction engine.
+
+Candidate note: subsequence is part of the corrected MBP-1 checksum contract.
+Historical pre-R0 checksum goldens remain legacy evidence and are not the
+candidate merge gate before migration differentials are classified.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ CHECKSUM_COLS = [
     "price",
     "flags",
     "sequence",
+    "subsequence",
     "bid_px_00",
     "ask_px_00",
     "bid_sz_00",

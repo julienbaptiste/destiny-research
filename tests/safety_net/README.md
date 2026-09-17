@@ -125,6 +125,55 @@ To classify an approved change, create a small JSON file bound to the exact sign
 
 Then rerun with `--classification /path/to/classification.json`. A stale classification for another diff is rejected. `EXPECTED_CHANGE` requires a decision reference; `UNEXPECTED_REGRESSION` returns a blocking exit code.
 
+## Reviewed R0.1/R0.2 classification replay
+
+The six-canary R0.1/R0.2 qualification generated twelve reviewed MBO/MBP1 signatures from candidate commit `c731de7f41769a7234778e911a101a4afa4b07c5`. Their exact human-reviewed classifications are committed in:
+
+`tests/safety_net/classifications/r0_1_r0_2.json`
+
+Do not rerun the expensive ingestion/reconstruction canaries merely to apply these classifications. Reuse the existing `/tmp/destiny_r0_candidate_canary` evidence:
+
+```bash
+python tests/safety_net/run_candidate_preflight.py
+python tests/safety_net/classify_candidate_evidence.py
+```
+
+`classify_candidate_evidence.py` is intentionally strict:
+
+- the existing qualification summary must reference the exact reviewed candidate commit;
+- all six canaries must be present;
+- every classification must bind the exact current `diff_signature`;
+- stale signatures are rejected by `apply_classification()`;
+- classified reports are written beside the original unclassified reports rather than overwriting them;
+- success requires every reviewed changed output to resolve to `EXPECTED_CHANGE` (or `NO_CHANGE` if a future identical report is deliberately left unclassified).
+
+The replay writes `/tmp/destiny_r0_candidate_canary/candidate_qualification_classified_summary.json`. Corrected goldens may be frozen only after this replay passes locally.
+
+## Corrected R0.1/R0.2 golden freeze
+
+The historical pre-R0 golden directories remain immutable evidence. Canonical post-migration references live in a separate namespace:
+
+`tests/regression/corrected/r0_1_r0_2/`
+
+After the strict classification replay has passed, freeze directly from the already-qualified isolated canary outputs:
+
+```bash
+python tests/safety_net/freeze_corrected_goldens.py
+```
+
+The freezer never reruns ingestion or reconstruction. Before writing any golden it:
+
+- requires the classified six-canary summary and the exact reviewed evidence commit;
+- requires all twelve detailed reports to remain `EXPECTED_CHANGE` with the reviewed signatures;
+- recomputes the full bounded-memory semantic fingerprint and physical file SHA-256 for every MBO/MBP1 source Parquet and requires an exact match with the qualified evidence;
+- revalidates the HSI/MHI rejected-event Parquet fingerprints when those datasets exist;
+- computes a 50k-row fast checksum using the corrected canonical columns;
+- refuses to overwrite a divergent corrected golden unless `--overwrite` is explicitly supplied after a newly reviewed qualification.
+
+The corrected MBO checksum includes `norm_flags`, `sequence` and `subsequence`. The corrected MBP1 checksum includes `sequence` and `subsequence`.
+
+A successful freeze writes twelve product/kind JSON goldens plus `manifest.json`. It does not modify `tests/regression/normalization/golden/` or `tests/regression/reconstruction/golden/`.
+
 ## Historical deep runner
 
 The historical `python tests/run_all_checks.py` deep mode still writes through the production pipeline. For R0 work, use it only deliberately; `--skip-pipeline` remains the safe fast-golden mode.

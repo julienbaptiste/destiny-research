@@ -1,13 +1,9 @@
-"""Human-readable synthetic fixture runner for the R0 safety net.
+"""Human-readable synthetic fixture runner for R0 migrations.
 
-The framework deliberately keeps provider input fixtures as JSON and exercises
-real production adapter, validator and reconstruction code. Databento records
-are represented by a lightweight test record class instead of opaque DBN bytes;
-the adapter's translation logic itself is not replaced.
-
-Fixtures marked ``baseline_compatible=false`` describe future normative targets
-and are schema-checked but are not asserted against the pre-R0 implementation.
-This keeps future contract expectations separate from legacy characterization.
+Provider-shaped JSON is translated through production adapters, validated through
+the production validator, applied to the production LOB state machine and then
+reconstructed into MBP-1. Fixtures may express full exact expectations or a
+review-friendly subset for future semantic targets.
 """
 
 from __future__ import annotations
@@ -24,8 +20,18 @@ import ingestion.adapters.databento_adapter as databento_module
 from ingestion.adapters.base import ContractInfo, SessionConfig
 from ingestion.adapters.databento_adapter import DatabentoAdapter
 from ingestion.adapters.hkex_adapter import HKEXAdapter
-from ingestion.schema import NORMALIZED_MBO_SCHEMA, ValidationMode
-from ingestion.validator import ValidatorState, _build_rejected_row, validate_event
+from ingestion.schema import (
+    Flags,
+    NormFlags,
+    NORMALIZED_MBO_SCHEMA,
+    ValidationMode,
+)
+from ingestion.validator import (
+    ValidatorState,
+    _build_rejected_row,
+    mark_validation_anomaly,
+    validate_event,
+)
 from reconstruction.build_mbp1 import Market, _apply_book, reconstruct_day
 
 
@@ -63,7 +69,6 @@ def validate_fixture_shape(case: dict[str, Any]) -> None:
     missing = sorted(_REQUIRED_TOP_LEVEL - set(case))
     if missing:
         raise ValueError(f"Fixture {case.get('id', '<unknown>')} missing fields: {missing}")
-
     if case["fixture_version"] != 1:
         raise ValueError(f"Unsupported fixture version: {case['fixture_version']}")
     if case["status"] != "NORMATIVE":
@@ -76,23 +81,6 @@ def validate_fixture_shape(case: dict[str, Any]) -> None:
     missing_session = sorted(required_session - set(session))
     if missing_session:
         raise ValueError(f"Fixture {case['id']} missing session fields: {missing_session}")
-
-    expected = case["expected"]
-    if case["baseline_compatible"]:
-        required_expected = {
-            "adapter_events",
-            "validator_stats",
-            "rejected_reasons",
-            "final_orders",
-            "mbp1_rows",
-            "reconstruction_stats",
-        }
-        missing_expected = sorted(required_expected - set(expected))
-        if missing_expected:
-            raise ValueError(
-                f"Baseline-compatible fixture {case['id']} missing expectations: "
-                f"{missing_expected}"
-            )
 
 
 def _session_config(case: dict[str, Any]) -> SessionConfig:
@@ -117,8 +105,24 @@ def _contract_info(case: dict[str, Any]) -> ContractInfo:
     )
 
 
-def _expand_normalized_row(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
-    """Fill static session fields omitted from human-readable expectations."""
+def _norm_flags_value(value: Any) -> int:
+    """Convert an integer or list of NormFlags names into a uint16 mask."""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, list):
+        mask = 0
+        for name in value:
+            try:
+                mask |= int(getattr(NormFlags, str(name)))
+            except AttributeError as exc:
+                raise ValueError(f"Unknown norm flag {name!r}") from exc
+        return mask
+    raise TypeError(f"Unsupported norm_flags fixture value: {value!r}")
+
+
+def _expand_static_fields(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     session = case["session"]
     expanded = dict(row)
     expanded.setdefault("venue", session["venue"])
@@ -126,21 +130,38 @@ def _expand_normalized_row(case: dict[str, Any], row: dict[str, Any]) -> dict[st
     expanded.setdefault("contract", session["contract"])
     expanded.setdefault("publisher_id", int(session.get("publisher_id", 0)))
     expanded.setdefault("instrument_id", int(session["instrument_id"]))
+    if "norm_flags" in expanded:
+        expanded["norm_flags"] = _norm_flags_value(expanded["norm_flags"])
     return expanded
 
 
+def _sparse_expected_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize authored values without adding constraints to future targets."""
+    sparse = dict(row)
+    if "norm_flags" in sparse:
+        sparse["norm_flags"] = _norm_flags_value(sparse["norm_flags"])
+    return sparse
+
+
+def _assign_expected_subsequences(rows: list[dict[str, Any]]) -> None:
+    """Fill omitted expected subsequences in stable row order per sequence."""
+    next_by_sequence: dict[int, int] = {}
+    for row in rows:
+        if "sequence" not in row or "subsequence" in row:
+            continue
+        sequence = int(row["sequence"])
+        subsequence = next_by_sequence.get(sequence, 0)
+        row["subsequence"] = subsequence
+        next_by_sequence[sequence] = subsequence + 1
+
+
 def _translate_databento(case: dict[str, Any], monkeypatch: Any) -> list[dict[str, Any]]:
-    """Translate fixture records through the production Databento adapter."""
     session = case["session"]
     adapter = DatabentoAdapter()
     adapter._config = _session_config(case)
     adapter._venue = session["venue"]
-    info = _contract_info(case)
-    adapter._contract_cache[int(session["instrument_id"])] = info
+    adapter._contract_cache[int(session["instrument_id"])] = _contract_info(case)
 
-    # DatabentoAdapter has an isinstance guard against db.MBOMsg. Replacing the
-    # class symbol only inside the test process lets JSON records exercise the
-    # real translation path without manufacturing proprietary DBN binaries.
     monkeypatch.setattr(databento_module.db, "MBOMsg", FixtureMBOMsg)
 
     translated: list[dict[str, Any]] = []
@@ -155,13 +176,11 @@ def _translate_databento(case: dict[str, Any], monkeypatch: Any) -> list[dict[st
 
 
 def _translate_hkex(case: dict[str, Any]) -> list[dict[str, Any]]:
-    """Translate fixture dictionaries through the production HKEX adapter."""
     session = case["session"]
     adapter = HKEXAdapter()
     adapter._config = _session_config(case)
-    info = _contract_info(case)
     instrument_id = int(session["instrument_id"])
-    adapter._ob_map[instrument_id] = info
+    adapter._ob_map[instrument_id] = _contract_info(case)
 
     translated: list[dict[str, Any]] = []
     for source in case["source_events"]:
@@ -192,7 +211,6 @@ def _translate_hkex(case: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def translate_fixture(case: dict[str, Any], monkeypatch: Any) -> list[dict[str, Any]]:
-    """Translate all provider records for one fixture."""
     if case["provider"] == "databento":
         return _translate_databento(case, monkeypatch)
     return _translate_hkex(case)
@@ -202,7 +220,7 @@ def _validate_events(
     case: dict[str, Any],
     adapter_events: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], ValidatorState]:
-    """Validate events exactly like production ingestion, preserving feed order."""
+    """Mirror production one-event-at-a-time validation in feed order."""
     session = case["session"]
     mode = session.get("validation_mode", ValidationMode.STRICT)
     state = ValidatorState(
@@ -217,24 +235,19 @@ def _validate_events(
         if warmup_end_before is not None and index == int(warmup_end_before):
             state.warmup_end()
 
-        # Mirror ingest_file(): validate one event at a time, persist the rejected
-        # audit row explicitly, and retain flagged anomalies only in LOOSE mode.
         is_clean, reason = validate_event(event, state)
         if is_clean:
             clean_rows.append(event)
             continue
 
-        rejected_rows.append(_build_rejected_row(event, reason, mode))
+        rejected_rows.append(_build_rejected_row(event, reason or "UNKNOWN", mode))
         if mode == ValidationMode.LOOSE:
-            flagged = dict(event)
-            flagged["flags"] = event.get("flags", 0) | 0x04
-            clean_rows.append(flagged)
+            clean_rows.append(mark_validation_anomaly(event))
 
     return clean_rows, rejected_rows, state
 
 
 def _final_order_state(clean_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Apply validated events to the production book state and expose active orders."""
     market = Market()
     for event in clean_rows:
         _apply_book(
@@ -280,19 +293,20 @@ def _reconstruct(
     clean_rows: list[dict[str, Any]],
     tmp_path: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Run the production reconstruction engine on validated synthetic events."""
     mbo_path = tmp_path / f"{case['id']}_mbo.parquet"
     mbp1_path = tmp_path / f"{case['id']}_mbp1.parquet"
-    table = pa.Table.from_pylist(clean_rows, schema=NORMALIZED_MBO_SCHEMA)
-    pq.write_table(table, mbo_path, compression="zstd")
+    pq.write_table(
+        pa.Table.from_pylist(clean_rows, schema=NORMALIZED_MBO_SCHEMA),
+        mbo_path,
+        compression="zstd",
+    )
     stats = reconstruct_day(
         mbo_file=mbo_path,
         out_file=mbp1_path,
         product=case["session"]["product"],
         contract=case["session"]["contract"],
     )
-    rows = pq.read_table(mbp1_path).to_pylist()
-    return rows, stats
+    return pq.read_table(mbp1_path).to_pylist(), stats
 
 
 def execute_fixture(
@@ -300,11 +314,8 @@ def execute_fixture(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> dict[str, Any]:
-    """Execute one baseline-compatible normative fixture end to end."""
+    """Execute any normative fixture against the current candidate implementation."""
     validate_fixture_shape(case)
-    if not case["baseline_compatible"]:
-        raise ValueError(f"Fixture {case['id']} is a future target, not baseline-compatible")
-
     adapter_events = translate_fixture(case, monkeypatch)
     clean_rows, rejected_rows, state = _validate_events(case, adapter_events)
     mbp1_rows, reconstruction_stats = _reconstruct(case, clean_rows, tmp_path)
@@ -333,17 +344,50 @@ def execute_fixture(
 
 
 def expected_fixture_result(case: dict[str, Any]) -> dict[str, Any]:
-    """Expand compact JSON expectations into the exact comparison payload."""
+    """Expand exact legacy expectations while keeping future targets sparse."""
     expected = case["expected"]
-    adapter_events = [
-        _expand_normalized_row(case, row) for row in expected["adapter_events"]
-    ]
+    is_baseline = bool(case["baseline_compatible"])
+    default_norm_flags = (
+        int(NormFlags.N_COARSE_TS) if case["provider"] == "hkex" else 0
+    )
+
+    if is_baseline:
+        adapter_events = [
+            _expand_static_fields(case, row) for row in expected["adapter_events"]
+        ]
+        _assign_expected_subsequences(adapter_events)
+        for row in adapter_events:
+            row.setdefault("norm_flags", default_norm_flags)
+    else:
+        adapter_events = [
+            _sparse_expected_row(row) for row in expected["adapter_events"]
+        ]
+
     if expected.get("clean_equals_adapter", False):
-        clean_events = adapter_events
+        clean_events = [dict(row) for row in adapter_events]
+    elif is_baseline:
+        clean_events = [
+            _expand_static_fields(case, row) for row in expected.get("clean_events", [])
+        ]
+        _assign_expected_subsequences(clean_events)
+        for row in clean_events:
+            row.setdefault("norm_flags", default_norm_flags)
     else:
         clean_events = [
-            _expand_normalized_row(case, row) for row in expected.get("clean_events", [])
+            _sparse_expected_row(row) for row in expected.get("clean_events", [])
         ]
+
+    mbp1_rows = [dict(row) for row in expected["mbp1_rows"]]
+    if is_baseline:
+        # Exact legacy fixtures carry the final normalized row's subsequence.
+        final_by_sequence: dict[int, int] = {}
+        for row in clean_events:
+            if "sequence" in row and "subsequence" in row:
+                if int(row.get("flags", 0)) & int(Flags.F_LAST):
+                    final_by_sequence[int(row["sequence"])] = int(row["subsequence"])
+        for row in mbp1_rows:
+            if "sequence" in row and "subsequence" not in row:
+                row["subsequence"] = final_by_sequence.get(int(row["sequence"]), 0)
 
     return {
         "adapter_events": adapter_events,
@@ -351,6 +395,6 @@ def expected_fixture_result(case: dict[str, Any]) -> dict[str, Any]:
         "rejected_reasons": expected["rejected_reasons"],
         "validator_stats": expected["validator_stats"],
         "final_orders": expected["final_orders"],
-        "mbp1_rows": expected["mbp1_rows"],
+        "mbp1_rows": mbp1_rows,
         "reconstruction_stats": expected["reconstruction_stats"],
     }

@@ -1,87 +1,24 @@
 """
-reconstruction/build_mbp1.py — MBO → MBP-1 reconstruction engine.
+reconstruction/build_mbp1.py — canonical MBO -> MBP-1 reconstruction.
 
-Reads normalized MBO Parquet files (output of ingestion pipeline) and
-reconstructs the top-of-book (MBP-1) state for each day.
-
-Output schema mirrors Databento's native MBP-1 format exactly, enabling
-direct comparison via tests/validation/validate_mbp1.py:
-    ts_event, ts_recv      — uint64 nanoseconds UTC
-    action                 — string (ADD/CANCEL/MODIFY/TRADE/FILL/CLEAR/NONE)
-    side                   — string (BID/ASK/NONE)
-    price                  — float64 (fixed-point / FIXED_PRICE_SCALE)
-    flags                  — uint8
-    sequence               — uint32
-    bid_px_00, ask_px_00   — float64 (real price = fixed-point / 1e9)
-    bid_sz_00, ask_sz_00   — uint32
-    bid_ct_00, ask_ct_00   — uint32
-
-Emission rule:
-    A snapshot row is emitted when ALL of the following hold:
-      1. F_LAST (0x80) is set — the atomic event group is complete.
-      2. At least one event in the group modified the book state
-         (action ADD, CANCEL, MODIFY, or CLEAR).
-    Additionally, TRADE events trigger an emission (post-trade TOB snapshot)
-    to match the Databento MBP-1 reference format which includes T rows.
-
-    F_SNAPSHOT events (warmup bootstrap) are applied to seed the book but
-    do NOT emit output rows — they are not live market events.
-
-Book state machine (adapted from Databento's official algorithm):
-    - SortedDict bids (descending) / offers (ascending) keyed by price level
-    - orders_by_id dict for O(1) lookup on CANCEL and MODIFY
-    - F_TOB messages replace an entire book side (synthetic aggregate)
-    - MODIFY with price change → loses queue priority
-    - MODIFY with size increase → loses queue priority
-    - MODIFY with unknown order_id → treated as ADD (GTC cross-session)
-    - CANCEL to zero → removes order and level if empty
-
-GTC orphan handling (EUREX):
-    CANCEL/MODIFY for order_ids not in orders_by_id are silently tolerated
-    (MODIFY falls back to ADD, CANCEL is skipped with a warning counter).
-    These are GTC orders placed J-1 whose ADD is in the previous day's file.
-
-Usage:
-    # Single day
-    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --date 2025-10-01
-
-    # Full month batch
-    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --month 2025-10
-
-    # All contracts for a product/month (auto-discovers contracts from normalized dir)
-    python reconstruction/build_mbp1.py --product ES --month 2025-10 --all-contracts
-
-    # Full year, single contract
-    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --year 2025
-
-    # Full year, all contracts (auto-discovers contracts per month)
-    python reconstruction/build_mbp1.py --product ES --year 2025 --all-contracts
-
-    # All available data, all contracts
-    python reconstruction/build_mbp1.py --product ES --all-data
-
-    # All available data, specific contract filter
-    python reconstruction/build_mbp1.py --product ES --contract ESZ25 --all-data
-
-    # Multiple products at once
-    python reconstruction/build_mbp1.py --product HSI HHI MHI MCH --all-data
-
-    # Overwrite existing outputs
-    python reconstruction/build_mbp1.py --product ES --month 2025-10 --overwrite
+The engine is provider-neutral. It consumes the normalized event contract,
+applies only state-changing actions to the resting book, and emits a consistent
+MBP-1 snapshot only at F_LAST boundaries. TRADE/FILL are informational rows;
+provider adapters must express deterministic book effects through ADD/CANCEL/
+MODIFY/CLEAR.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import date, datetime
 import logging
+from pathlib import Path
 import re
 import sys
 import time
-from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
-from itertools import takewhile
-from pathlib import Path
 from typing import Iterator
 
 import pyarrow as pa
@@ -90,16 +27,12 @@ from sortedcontainers import SortedDict
 
 from utils.logging_config import setup_logging
 
-# ---------------------------------------------------------------------------
-# Repo root + project imports
-# ---------------------------------------------------------------------------
-
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from config import DATA_NORMALIZED, DATA_RECONSTRUCTED  # noqa: E402
-from ingestion.market_config import MARKET_CONFIG        # noqa: E402
-from ingestion.schema import (                           # noqa: E402
+from ingestion.market_config import MARKET_CONFIG  # noqa: E402
+from ingestion.schema import (  # noqa: E402
     Action,
     Flags,
     Side,
@@ -108,199 +41,155 @@ from ingestion.schema import (                           # noqa: E402
     reconstructed_path,
 )
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
 log = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# Output schema
+# OUTPUT SCHEMA
 # ---------------------------------------------------------------------------
 
-# Mirrors Databento MBP-1 native schema for direct validation comparison.
-# Prices are float64 (real values = fixed-point / FIXED_PRICE_SCALE).
-# Timestamp columns are uint64 nanoseconds since Unix epoch.
 MBP1_SCHEMA = pa.schema([
     pa.field("ts_event",   pa.uint64(),  nullable=False),
     pa.field("ts_recv",    pa.uint64(),  nullable=False),
     pa.field("action",     pa.string(),  nullable=False),
     pa.field("side",       pa.string(),  nullable=False),
-    pa.field("price",      pa.float64(), nullable=False),  # triggering event price
+    pa.field("price",      pa.float64(), nullable=False),
     pa.field("flags",      pa.uint8(),   nullable=False),
     pa.field("sequence",   pa.uint32(),  nullable=False),
-    pa.field("bid_px_00",  pa.float64(), nullable=True),   # None if no bid
-    pa.field("ask_px_00",  pa.float64(), nullable=True),   # None if no ask
+    pa.field("subsequence", pa.uint16(), nullable=False),
+    pa.field("bid_px_00",  pa.float64(), nullable=True),
+    pa.field("ask_px_00",  pa.float64(), nullable=True),
     pa.field("bid_sz_00",  pa.uint32(),  nullable=True),
     pa.field("ask_sz_00",  pa.uint32(),  nullable=True),
     pa.field("bid_ct_00",  pa.uint32(),  nullable=True),
     pa.field("ask_ct_00",  pa.uint32(),  nullable=True),
 ])
 
-# Row group size for Parquet output — tuned for sequential scan in DuckDB
-_ROW_GROUP_SIZE = 500_000
+_SCALE = float(FIXED_PRICE_SCALE)
+_F_TOB = int(Flags.F_TOB)
+_F_LAST = int(Flags.F_LAST)
+_F_SNAPSHOT = int(Flags.F_SNAPSHOT)
+
 
 # ---------------------------------------------------------------------------
-# Book state machine — adapted from Databento's official algorithm
+# BOOK STATE
 # ---------------------------------------------------------------------------
 
 @dataclass(slots=True)
 class _Order:
-    """Single resting order in the book."""
-    order_id : int
-    price    : int    # fixed-point int64
-    size     : int    # remaining size
-    side     : str    # Side.BID or Side.ASK
-    flags    : int    # original flags bitmask
+    order_id: int
+    price: int
+    size: int
+    side: str
+    flags: int
 
 
 @dataclass(slots=True)
 class _PriceLevel:
-    """Aggregated state of one price level."""
-    price  : int
-    size   : int = 0
-    count  : int = 0   # number of non-F_TOB orders
+    price: int
+    size: int = 0
+    count: int = 0
 
 
 @dataclass(slots=True)
 class _LevelOrders:
-    """
-    All orders resting at one price level (preserves queue order).
-
-    size and count are maintained incrementally on every add/remove —
-    never recomputed from scratch. This eliminates the O(n) sum() call
-    that was the primary bottleneck (458M enum.__and__ calls in profiling).
-
-    count: number of non-F_TOB orders (real orders, excludes synthetic)
-    size:  total resting size across all orders at this level
-    """
-    price  : int
-    orders : list[_Order] = field(default_factory=list)
-    size   : int = 0    # maintained incrementally
-    count  : int = 0    # maintained incrementally (excludes F_TOB orders)
+    price: int
+    orders: list[_Order] = field(default_factory=list)
+    size: int = 0
+    count: int = 0
 
     def __bool__(self) -> bool:
         return bool(self.orders)
 
-    @property
-    def level(self) -> _PriceLevel:
-        """Return a _PriceLevel snapshot. size/count are already up-to-date."""
-        return _PriceLevel(price=self.price, size=self.size, count=self.count)
-
     def add_order(self, order: _Order, is_tob: bool) -> None:
-        """Append order and update incremental aggregates."""
         self.orders.append(order)
         self.size += order.size
         if not is_tob:
             self.count += 1
 
     def remove_order(self, order: _Order, is_tob: bool) -> None:
-        """Remove order and update incremental aggregates."""
         try:
             self.orders.remove(order)
         except ValueError:
             return
-        self.size  -= order.size
+        self.size -= order.size
         if not is_tob:
             self.count -= 1
 
     def update_size(self, old_size: int, new_size: int) -> None:
-        """Update incremental size after an in-place modify (no priority change)."""
         self.size += new_size - old_size
 
 
 class Book:
-    """
-    Single-instrument limit order book.
+    """Single-instrument MBO book keyed by (order_id, side)."""
 
-    Maintains full order-level state for MBO reconstruction.
-    bids: SortedDict keyed by price (ascending) — peek last for best bid.
-    offers: SortedDict keyed by price (ascending) — peek first for best ask.
-    orders_by_id: dict for O(1) lookup on CANCEL/MODIFY.
-    """
-
-    __slots__ = ("orders_by_id", "offers", "bids", "_n_orphan_cancel",
-                 "_n_orphan_modify")
+    __slots__ = (
+        "orders_by_id",
+        "offers",
+        "bids",
+        "_n_orphan_cancel",
+        "_n_orphan_modify",
+    )
 
     def __init__(self) -> None:
-        self.orders_by_id   : dict[tuple[int,str], _Order]  = {}
-        self.offers         : SortedDict[int, _LevelOrders] = SortedDict()
-        self.bids           : SortedDict[int, _LevelOrders] = SortedDict()
-        # Counters for GTC orphan events (EUREX cross-session orders)
-        self._n_orphan_cancel : int = 0
-        self._n_orphan_modify : int = 0
+        self.orders_by_id: dict[tuple[int, str], _Order] = {}
+        self.offers: SortedDict[int, _LevelOrders] = SortedDict()
+        self.bids: SortedDict[int, _LevelOrders] = SortedDict()
+        self._n_orphan_cancel = 0
+        self._n_orphan_modify = 0
 
-    # ------------------------------------------------------------------
-    # TOB access
-    # ------------------------------------------------------------------
-
-    def best_bid(self) -> _PriceLevel | None:
-        """Return the best bid level, or None if the bid side is empty."""
-        if self.bids:
-            lo = self.bids.peekitem(-1)[1]
-            return _PriceLevel(price=lo.price, size=lo.size, count=lo.count)
-        return None
-
-    def best_ask(self) -> _PriceLevel | None:
-        """Return the best ask level, or None if the ask side is empty."""
-        if self.offers:
-            lo = self.offers.peekitem(0)[1]
-            return _PriceLevel(price=lo.price, size=lo.size, count=lo.count)
-        return None
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _side_levels(self, side: str) -> SortedDict:
-        """Return the SortedDict for the given side."""
+    def _side_levels(self, side: str) -> SortedDict[int, _LevelOrders]:
         if side == Side.ASK:
             return self.offers
         if side == Side.BID:
             return self.bids
-        raise ValueError(f"Invalid side '{side}'")
+        raise ValueError(f"Invalid resting side: {side!r}")
 
     def _get_level(self, price: int, side: str) -> _LevelOrders | None:
-        """Return the _LevelOrders for a (price, side) pair, or None."""
-        levels = self._side_levels(side)
-        return levels.get(price)
+        return self._side_levels(side).get(price)
 
     def _get_or_insert_level(self, price: int, side: str) -> _LevelOrders:
-        """Return the _LevelOrders for (price, side), inserting if absent."""
         levels = self._side_levels(side)
-        if price not in levels:
-            levels[price] = _LevelOrders(price=price)
-        return levels[price]
+        level = levels.get(price)
+        if level is None:
+            level = _LevelOrders(price=price)
+            levels[price] = level
+        return level
 
     def _remove_level(self, price: int, side: str) -> None:
-        """Remove an empty price level from the book."""
-        levels = self._side_levels(side)
-        levels.pop(price, None)
+        self._side_levels(side).pop(price, None)
 
-    def _clear(self) -> None:
-        """Hard reset — remove all resting orders from both sides."""
+    def clear(self) -> None:
         self.orders_by_id.clear()
         self.offers.clear()
         self.bids.clear()
 
+    def clear_side(self, side: str) -> None:
+        """Remove an entire quoted side including order-id state."""
+        self._side_levels(side).clear()
+        stale_keys = [key for key in self.orders_by_id if key[1] == side]
+        for key in stale_keys:
+            self.orders_by_id.pop(key, None)
 
-# ---------------------------------------------------------------------------
-# Market — multi-instrument, multi-publisher container
-# ---------------------------------------------------------------------------
+    def best_bid(self) -> _PriceLevel | None:
+        if not self.bids:
+            return None
+        level = self.bids.peekitem(-1)[1]
+        return _PriceLevel(level.price, level.size, level.count)
+
+    def best_ask(self) -> _PriceLevel | None:
+        if not self.offers:
+            return None
+        level = self.offers.peekitem(0)[1]
+        return _PriceLevel(level.price, level.size, level.count)
+
 
 class Market:
-    """
-    Container for all per-instrument, per-publisher Books.
-
-    Keyed on (instrument_id, publisher_id) — same as Databento's official algo.
-    For single-publisher files (typical normalized Parquet), publisher_id is
-    constant but we keep the structure for correctness.
-    """
+    """Per-(instrument_id, publisher_id) book container."""
 
     __slots__ = ("_books",)
 
     def __init__(self) -> None:
-        # instrument_id → publisher_id → Book
         self._books: defaultdict[int, defaultdict[int, Book]] = defaultdict(
             lambda: defaultdict(Book)
         )
@@ -313,50 +202,144 @@ class Market:
 
 
 # ---------------------------------------------------------------------------
-# Snapshot builder
+# STATE TRANSITIONS
 # ---------------------------------------------------------------------------
 
-_SCALE = float(FIXED_PRICE_SCALE)  # 1e9 — used for fixed-point → float conversion
+def _book_add(
+    book: Book,
+    price: int,
+    size: int,
+    side: str,
+    order_id: int,
+    flags: int,
+) -> None:
+    is_tob = bool(flags & _F_TOB)
+    order = _Order(order_id, price, size, side, flags)
+
+    if is_tob:
+        # F_TOB is a side replacement, not an order-level ADD.
+        book.clear_side(side)
+        level = _LevelOrders(price=price, size=size, count=0)
+        level.orders.append(order)
+        book._side_levels(side)[price] = level
+        return
+
+    level = book._get_or_insert_level(price, side)
+    book.orders_by_id[(order_id, side)] = order
+    level.add_order(order, is_tob=False)
+
+
+def _book_cancel(
+    book: Book,
+    price: int,
+    size: int,
+    side: str,
+    order_id: int,
+) -> None:
+    key = (order_id, side)
+    order = book.orders_by_id.get(key)
+    if order is None:
+        book._n_orphan_cancel += 1
+        return
+
+    level = book._get_level(price, side)
+    if level is None:
+        book._n_orphan_cancel += 1
+        return
+
+    old_size = order.size
+    order.size = max(0, order.size - size)
+    if order.size > 0:
+        level.update_size(old_size, order.size)
+        return
+
+    book.orders_by_id.pop(key, None)
+    is_tob = bool(order.flags & _F_TOB)
+    level.size -= old_size
+    if not is_tob:
+        level.count -= 1
+    try:
+        level.orders.remove(order)
+    except ValueError:
+        pass
+    if not level:
+        book._remove_level(price, side)
+
+
+def _book_modify(
+    book: Book,
+    price: int,
+    size: int,
+    side: str,
+    order_id: int,
+    flags: int,
+) -> None:
+    key = (order_id, side)
+    order = book.orders_by_id.get(key)
+    if order is None:
+        book._n_orphan_modify += 1
+        _book_add(book, price, size, side, order_id, flags)
+        return
+
+    level = book._get_level(order.price, side)
+    is_tob = bool(order.flags & _F_TOB)
+    if level is None:
+        book._n_orphan_modify += 1
+        _book_add(book, price, size, side, order_id, flags)
+        return
+
+    if order.price != price:
+        level.remove_order(order, is_tob=is_tob)
+        if not level:
+            book._remove_level(order.price, side)
+        order.price = price
+        order.size = size
+        order.flags = flags
+        book._get_or_insert_level(price, side).add_order(order, is_tob=is_tob)
+    elif size > order.size:
+        # Size increase loses queue priority.
+        level.remove_order(order, is_tob=is_tob)
+        order.size = size
+        order.flags = flags
+        level.add_order(order, is_tob=is_tob)
+    else:
+        # Size decrease retains queue priority.
+        old_size = order.size
+        order.size = size
+        order.flags = flags
+        level.update_size(old_size, size)
+
+    book.orders_by_id[key] = order
 
 
 def _apply_book(
-    market   : Market,
-    action   : str,
-    side     : str,
-    price    : int,
-    size     : int,
-    order_id : int,
-    flags    : int,
-    iid      : int,
-    pid      : int,
+    market: Market,
+    action: str,
+    side: str,
+    price: int,
+    size: int,
+    order_id: int,
+    flags: int,
+    iid: int,
+    pid: int,
 ) -> bool:
-    """
-    Apply one MBO event to the appropriate book in market.
-
-    Standalone function (not a method) to avoid attribute lookup overhead
-    in the hot loop. Takes individual fields rather than a dict.
-
-    Returns True if book state changed, False if event was ignored.
-    """
+    """Apply one normalized row and return whether resting state changed."""
     book = market._books[iid][pid]
 
-    # TRADE, FILL, NONE — no book state change
-    if action == Action.TRADE or action == Action.FILL or action == Action.NONE:
+    if action in (Action.TRADE, Action.FILL, Action.NONE):
         return False
 
-    # CLEAR — wipe the entire book
     if action == Action.CLEAR:
-        book._clear()
+        book.clear()
         return True
 
-    # F_TOB with UNDEF_PRICE — clear one side entirely.
-    # Use int literals for bitmask ops — avoids enum.__and__ overhead.
-    if (flags & 0x01) and price == UNDEF_PRICE:
-        book._side_levels(side).clear()
-        return True
+    if flags & _F_TOB and price == UNDEF_PRICE:
+        if side in Side.ORDER_SIDES:
+            book.clear_side(side)
+            return True
+        return False
 
-    # Standard order-level actions require a valid side
-    if side != Side.BID and side != Side.ASK:
+    if side not in Side.ORDER_SIDES:
         return False
 
     if action == Action.ADD:
@@ -367,337 +350,161 @@ def _apply_book(
         _book_modify(book, price, size, side, order_id, flags)
     else:
         return False
-
     return True
 
 
-def _book_add(
-    book     : Book,
-    price    : int,
-    size     : int,
-    side     : str,
-    order_id : int,
-    flags    : int,
-) -> None:
-    """Insert a new order (or replace a book side for F_TOB)."""
-    # Use int literal for F_TOB check — avoids enum overhead in hot path
-    is_tob = bool(flags & 0x01)
-    order  = _Order(order_id=order_id, price=price, size=size, side=side, flags=flags)
-
-    if is_tob:
-        # F_TOB ADD: replace the entire side with a single synthetic level.
-        # order_id=0 on F_TOB messages — do NOT insert into orders_by_id.
-        levels = book._side_levels(side)
-        levels.clear()
-        lo = _LevelOrders(price=price, size=size, count=0)  # F_TOB: count=0
-        lo.orders.append(order)
-        levels[price] = lo
-    else:
-        level = book._get_or_insert_level(price, side)
-        book.orders_by_id[(order_id, side)] = order
-        level.add_order(order, is_tob=False)
-
-
-def _book_cancel(
-    book     : Book,
-    price    : int,
-    size     : int,
-    side     : str,
-    order_id : int,
-) -> None:
-    """Partially or fully cancel a resting order."""
-    if (order_id, side) not in book.orders_by_id:
-        book._n_orphan_cancel += 1
-        return
-
-    order = book.orders_by_id[(order_id, side)]
-    level = book._get_level(price, side)
-    if level is None:
-        book._n_orphan_cancel += 1
-        return
-
-    old_size   = order.size
-    order.size = max(0, order.size - size)
-
-    if order.size == 0:
-        # Fully cancelled — remove from book.
-        book.orders_by_id.pop((order_id, side))
-        is_tob = bool(order.flags & 0x01)
-        level.size -= old_size
-        if not is_tob:
-            level.count -= 1
-        try:
-            level.orders.remove(order)
-        except ValueError:
-            pass
-        if not level:
-            book._remove_level(price, side)
-    else:
-        # Partial cancel — update incremental size in place
-        level.update_size(old_size, order.size)
-
-def _book_modify(
-    book     : Book,
-    price    : int,
-    size     : int,
-    side     : str,
-    order_id : int,
-    flags    : int,
-) -> None:
-    """Modify price and/or size of a resting order."""
-    if (order_id, side) not in book.orders_by_id:
-        # GTC orphan — treat as ADD (MODIFY fallback for cross-session orders)
-        book._n_orphan_modify += 1
-        _book_add(book, price, size, side, order_id, flags)
-        return
-
-    order  = book.orders_by_id[(order_id, side)]
-    level  = book._get_level(order.price, order.side)
-    is_tob = bool(order.flags & 0x01)
-
-    if level is None:
-        _book_add(book, price, size, side, order_id, flags)
-        return
-
-    if order.price != price:
-        # Price change: remove from current level, append to new level (priority lost)
-        level.remove_order(order, is_tob=is_tob)
-        if not level:
-            book._remove_level(order.price, side)
-        order.price = price
-        order.size  = size
-        order.flags = flags
-        new_level = book._get_or_insert_level(price, side)
-        new_level.add_order(order, is_tob=is_tob)
-
-    elif size > order.size:
-        # Size increase: loses priority — move to end of queue
-        level.remove_order(order, is_tob=is_tob)
-        order.size  = size
-        order.flags = flags
-        level.add_order(order, is_tob=is_tob)
-
-    else:
-        # Size decrease or no change: update in place, keep priority
-        old_size    = order.size
-        order.size  = size
-        order.flags = flags
-        level.update_size(old_size, size)
-
-    book.orders_by_id[(order_id, side)] = order
-
-
 # ---------------------------------------------------------------------------
-# Core reconstruction loop
+# STREAMING RECONSTRUCTION
 # ---------------------------------------------------------------------------
 
 def reconstruct_day(
-    mbo_file     : Path,
-    out_file     : Path,
-    product      : str,
-    contract     : str,
+    mbo_file: Path,
+    out_file: Path,
+    product: str,
+    contract: str,
 ) -> dict:
-    """
-    Reconstruct MBP-1 for one day from a normalized MBO Parquet file.
+    """Reconstruct one normalized day in bounded memory."""
+    read_batch_size = 100_000
+    write_flush_rows = 50_000
+    started = time.perf_counter()
 
-    Reads the MBO file in streaming batches (READ_BATCH_SIZE rows at a time)
-    to cap memory usage. Each batch is extracted to Python lists, processed
-    through the book state machine, and output rows are flushed to Parquet
-    every WRITE_FLUSH_ROWS rows.
-
-    Memory profile (ES ~7.4M rows/day, READ_BATCH_SIZE=100_000):
-      - Arrow batch in memory: ~8MB at a time (vs ~600MB for full file)
-      - Python column lists: ~10MB per batch (released after each batch)
-      - Output row buffer: ~2MB at WRITE_FLUSH_ROWS=50_000
-
-    Atomic event group handling across batch boundaries:
-      Groups (F_LAST) are rarely split across batches in practice (event
-      groups are typically 1-4 events). The group_state_changed and
-      group_has_trade accumulators are maintained across batch iterations —
-      only reset on F_LAST regardless of batch boundary.
-
-    F_SNAPSHOT events (warmup bootstrap) are applied to seed the book but
-    do not produce output rows.
-
-    Args:
-        mbo_file: path to normalized MBO Parquet file.
-        out_file: path for the output MBP-1 Parquet file.
-        product:  product ticker (e.g. 'ES') — used for logging only.
-        contract: contract symbol (e.g. 'ESZ25') — used for logging only.
-
-    Returns:
-        Stats dict: n_events, n_rows_emitted, n_orphan_cancel, n_orphan_modify,
-                    elapsed_seconds.
-    """
-    # Number of MBO rows read per Arrow batch — controls peak RAM per batch.
-    # 100K rows ≈ 8MB Arrow + 10MB Python lists — safe on 16GB with other processes.
-    READ_BATCH_SIZE = 100_000
-
-    # Flush output rows to Parquet every N rows — bounds output buffer memory.
-    WRITE_FLUSH_ROWS = 50_000
-
-    t0 = time.perf_counter()
-
-    # Pre-compute flag constants as plain ints — enum.__and__ was the #1 bottleneck
-    # (458M calls to enum.__and__ / enum._get_value in profiling = 1150s wasted)
-    _F_LAST     = 0x80   # Flags.F_LAST
-    _F_SNAPSHOT = 0x20   # Flags.F_SNAPSHOT
-    _TRADE      = Action.TRADE
-    _FILL       = Action.FILL
-
-    # State machine — persists across all batches for this day
-    market         = Market()
-    rows           : list[dict] = []
-    n_events       = 0
+    market = Market()
+    output_rows: list[dict] = []
+    n_events = 0
     n_rows_emitted = 0
+    group_state_changed = False
+    group_has_trade = False
 
-    # Group state accumulators — survive batch boundaries
-    group_state_changed : bool = False
-    group_has_trade     : bool = False
-
-    # Output file — open before the batch loop
     out_file.parent.mkdir(parents=True, exist_ok=True)
     writer = pq.ParquetWriter(out_file, MBP1_SCHEMA, compression="zstd")
 
-    def _flush_output(rows: list[dict]) -> None:
-        """Write accumulated output rows to Parquet and clear the buffer."""
-        if not rows:
-            return
-        batch = pa.RecordBatch.from_pydict(
-            {col: [r[col] for r in rows] for col in MBP1_SCHEMA.names},
-            schema=MBP1_SCHEMA,
-        )
-        writer.write_batch(batch)
+    def col(batch: pa.RecordBatch, name: str) -> list:
+        array = batch.column(name)
+        if pa.types.is_dictionary(array.type):
+            array = array.cast(pa.string())
+        return array.to_pylist()
 
-    def _col_from_batch(batch: pa.RecordBatch, name: str) -> list:
-        """Extract a column from an Arrow RecordBatch as a Python list.
-        Dictionary-encoded columns are cast to plain strings first."""
-        arr = batch.column(name)
-        if pa.types.is_dictionary(arr.type):
-            arr = arr.cast(pa.string())
-        return arr.to_pylist()
+    def flush() -> None:
+        if not output_rows:
+            return
+        table = pa.Table.from_pylist(output_rows, schema=MBP1_SCHEMA)
+        writer.write_table(table)
+        output_rows.clear()
 
     try:
-        pf = pq.ParquetFile(mbo_file)
-
-        for arrow_batch in pf.iter_batches(batch_size=READ_BATCH_SIZE):
-            batch_len = len(arrow_batch)
+        parquet = pq.ParquetFile(mbo_file)
+        for batch in parquet.iter_batches(batch_size=read_batch_size):
+            batch_len = len(batch)
             n_events += batch_len
 
-            # Extract all needed columns as Python lists — O(batch_size) allocation.
-            # Released at end of each batch iteration (Python GC via local scope).
-            c_ts_event      = _col_from_batch(arrow_batch, "ts_event")
-            c_ts_recv       = _col_from_batch(arrow_batch, "ts_recv")
-            c_action        = _col_from_batch(arrow_batch, "action")
-            c_side          = _col_from_batch(arrow_batch, "side")
-            c_price         = _col_from_batch(arrow_batch, "price")
-            c_size          = _col_from_batch(arrow_batch, "size")
-            c_order_id      = _col_from_batch(arrow_batch, "order_id")
-            c_flags         = _col_from_batch(arrow_batch, "flags")
-            c_sequence      = _col_from_batch(arrow_batch, "sequence")
-            c_instrument_id = _col_from_batch(arrow_batch, "instrument_id")
-            c_publisher_id  = _col_from_batch(arrow_batch, "publisher_id")
+            c_ts_event = col(batch, "ts_event")
+            c_ts_recv = col(batch, "ts_recv")
+            c_action = col(batch, "action")
+            c_side = col(batch, "side")
+            c_price = col(batch, "price")
+            c_size = col(batch, "size")
+            c_order_id = col(batch, "order_id")
+            c_flags = col(batch, "flags")
+            c_sequence = col(batch, "sequence")
+            c_subsequence = col(batch, "subsequence")
+            c_instrument_id = col(batch, "instrument_id")
+            c_publisher_id = col(batch, "publisher_id")
+            del batch
 
-            # Release the Arrow batch immediately — column lists are sufficient
-            del arrow_batch
+            for index in range(batch_len):
+                flags = int(c_flags[index])
+                action = c_action[index]
+                side = c_side[index]
+                price = int(c_price[index])
+                size = int(c_size[index])
+                order_id = int(c_order_id[index])
+                iid = int(c_instrument_id[index])
+                pid = int(c_publisher_id[index])
 
-            # --- Hot loop over this batch ---
-            for i in range(batch_len):
-                flags    = c_flags[i]
-                is_snap  = bool(flags & _F_SNAPSHOT)
-                is_last  = bool(flags & _F_LAST)
-                action   = c_action[i]
-                side     = c_side[i]
-                price    = c_price[i]
-                size     = c_size[i]
-                order_id = c_order_id[i]
-                iid      = c_instrument_id[i]
-                pid      = c_publisher_id[i]
+                is_snapshot = bool(flags & _F_SNAPSHOT)
+                is_last = bool(flags & _F_LAST)
 
-                # Apply to book state machine
                 changed = _apply_book(
-                    market, action, side, price, size, order_id, flags, iid, pid
+                    market,
+                    action,
+                    side,
+                    price,
+                    size,
+                    order_id,
+                    flags,
+                    iid,
+                    pid,
                 )
 
-                if not is_snap:
-                    if changed:
-                        group_state_changed = True
-                    if action == _TRADE or action == _FILL:
-                        group_has_trade = True
+                if not is_snapshot:
+                    group_state_changed |= changed
+                    group_has_trade |= action in (Action.TRADE, Action.FILL)
 
-                if is_last:
-                    # Emit snapshot at end of atomic event group
-                    if not is_snap and (group_state_changed or group_has_trade):
-                        bid = market.best_bid(iid, pid)
-                        ask = market.best_ask(iid, pid)
-                        rows.append({
-                            "ts_event"  : c_ts_event[i],
-                            "ts_recv"   : c_ts_recv[i],
-                            "action"    : action,
-                            "side"      : side,
-                            "price"     : price / _SCALE,
-                            "flags"     : flags,
-                            "sequence"  : c_sequence[i],
-                            "bid_px_00" : bid.price / _SCALE if bid else None,
-                            "ask_px_00" : ask.price / _SCALE if ask else None,
-                            "bid_sz_00" : bid.size            if bid else None,
-                            "ask_sz_00" : ask.size            if ask else None,
-                            "bid_ct_00" : bid.count           if bid else None,
-                            "ask_ct_00" : ask.count           if ask else None,
-                        })
-                        n_rows_emitted += 1
+                if not is_last:
+                    continue
 
-                        # Flush output buffer at threshold
-                        if len(rows) >= WRITE_FLUSH_ROWS:
-                            _flush_output(rows)
-                            rows.clear()
+                if not is_snapshot and (group_state_changed or group_has_trade):
+                    bid = market.best_bid(iid, pid)
+                    ask = market.best_ask(iid, pid)
+                    output_rows.append(
+                        {
+                            "ts_event": int(c_ts_event[index]),
+                            "ts_recv": int(c_ts_recv[index]),
+                            "action": action,
+                            "side": side,
+                            "price": price / _SCALE,
+                            "flags": flags,
+                            "sequence": int(c_sequence[index]),
+                            "subsequence": int(c_subsequence[index]),
+                            "bid_px_00": bid.price / _SCALE if bid else None,
+                            "ask_px_00": ask.price / _SCALE if ask else None,
+                            "bid_sz_00": bid.size if bid else None,
+                            "ask_sz_00": ask.size if ask else None,
+                            "bid_ct_00": bid.count if bid else None,
+                            "ask_ct_00": ask.count if ask else None,
+                        }
+                    )
+                    n_rows_emitted += 1
+                    if len(output_rows) >= write_flush_rows:
+                        flush()
 
-                    group_state_changed = False
-                    group_has_trade     = False
+                group_state_changed = False
+                group_has_trade = False
 
-            # Column lists go out of scope here — GC reclaims ~10MB per batch
-
-        # Flush any remaining output rows
-        _flush_output(rows)
-
+        flush()
     finally:
         writer.close()
 
-    # Aggregate orphan stats across all books in the market
     n_orphan_cancel = sum(
-        b._n_orphan_cancel
-        for books_by_pub in market._books.values()
-        for b in books_by_pub.values()
+        book._n_orphan_cancel
+        for books_by_publisher in market._books.values()
+        for book in books_by_publisher.values()
     )
     n_orphan_modify = sum(
-        b._n_orphan_modify
-        for books_by_pub in market._books.values()
-        for b in books_by_pub.values()
+        book._n_orphan_modify
+        for books_by_publisher in market._books.values()
+        for book in books_by_publisher.values()
     )
 
-    elapsed = time.perf_counter() - t0
     return {
-        "n_events"       : n_events,
-        "n_rows_emitted" : n_rows_emitted,
+        "n_events": n_events,
+        "n_rows_emitted": n_rows_emitted,
         "n_orphan_cancel": n_orphan_cancel,
         "n_orphan_modify": n_orphan_modify,
-        "elapsed_seconds": round(elapsed, 2),
+        "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
 
 
 # ---------------------------------------------------------------------------
-# Path helpers
+# PATH / DISCOVERY HELPERS
 # ---------------------------------------------------------------------------
 
 def _normalized_dir(product: str, contract: str, year: int, month: int) -> Path:
-    """Return the normalized data directory for a product/contract/month."""
-    cfg      = MARKET_CONFIG[product]
-    venue    = cfg["exchange"]
-    provider = cfg["provider"]
+    cfg = MARKET_CONFIG[product]
     return (
         DATA_NORMALIZED
-        / f"provider={provider}"
-        / f"venue={venue}"
+        / f"provider={cfg['provider']}"
+        / f"venue={cfg['exchange']}"
         / f"product={product}"
         / f"contract={contract}"
         / f"year={year}"
@@ -706,148 +513,92 @@ def _normalized_dir(product: str, contract: str, year: int, month: int) -> Path:
 
 
 def _iter_mbo_files(
-    product  : str,
-    contract : str,
-    year     : int,
-    month    : int,
+    product: str,
+    contract: str,
+    year: int,
+    month: int,
 ) -> Iterator[tuple[Path, str]]:
-    """
-    Yield (mbo_file_path, date_str) for all normalized MBO files for a
-    given product/contract/year/month, sorted by date.
-
-    date_str format: 'YYYYMMDD' (matches reconstructed_path convention).
-    """
-    norm_dir = _normalized_dir(product, contract, year, month)
-    if not norm_dir.exists():
+    directory = _normalized_dir(product, contract, year, month)
+    if not directory.exists():
         return
-    for p in sorted(norm_dir.glob(f"{contract}_*_mbo.parquet")):
-        # Extract date as the first 8-digit numeric segment in the filename stem.
-        # Works for both outrights (ESZ25_20251001_mbo) and
-        # calendar spreads (ES_CAL_H26H27_20251001_mbo).
-        match = re.search(r"(\d{8})", p.stem)
+    for path in sorted(directory.glob(f"{contract}_*_mbo.parquet")):
+        match = re.search(r"(\d{8})", path.stem)
         if match:
-            date_str = match.group(1)
-            yield p, date_str
+            yield path, match.group(1)
 
 
-def _out_path(product: str, contract: str, year: int, month: int, date_str: str) -> Path:
-    """Return the output path for a reconstructed MBP-1 Parquet file."""
-    cfg      = MARKET_CONFIG[product]
-    venue    = cfg["exchange"]
-    provider = cfg["provider"]
+def _out_path(
+    product: str,
+    contract: str,
+    year: int,
+    month: int,
+    date_str: str,
+) -> Path:
+    cfg = MARKET_CONFIG[product]
     return reconstructed_path(
-        base_dir  = DATA_RECONSTRUCTED,
-        provider  = provider,
-        venue     = venue,
-        product   = product,
-        contract  = contract,
-        year      = year,
-        month     = month,
-        date_str  = date_str,
-        schema    = "mbp1",
+        DATA_RECONSTRUCTED,
+        cfg["provider"],
+        cfg["exchange"],
+        product,
+        contract,
+        year,
+        month,
+        date_str,
+        "mbp1",
     )
 
 
-# ---------------------------------------------------------------------------
-# Discovery helpers (used by --year and --all-data modes)
-# ---------------------------------------------------------------------------
-
-def _discover_contracts(product: str, year: int, month: int) -> list[str]:
-    """
-    Auto-discover all contracts under DATA_NORMALIZED for a given product/year/month.
-
-    Scans contract=* directories directly under the product root — does not
-    filter by year/month at this level (contracts may span multiple months).
-    Returns a sorted list of contract symbols.
-    """
-    cfg      = MARKET_CONFIG[product]
-    venue    = cfg["exchange"]
-    provider = cfg["provider"]
-    base = (
+def _product_root(product: str) -> Path:
+    cfg = MARKET_CONFIG[product]
+    return (
         DATA_NORMALIZED
-        / f"provider={provider}"
-        / f"venue={venue}"
+        / f"provider={cfg['provider']}"
+        / f"venue={cfg['exchange']}"
         / f"product={product}"
     )
+
+
+def _discover_contracts(product: str, year: int, month: int) -> list[str]:
+    root = _product_root(product)
     return sorted(
-        p.name.replace("contract=", "")
-        for p in base.glob("contract=*")
-        if p.is_dir()
+        path.name.removeprefix("contract=")
+        for path in root.glob("contract=*")
+        if path.is_dir()
+        and (path / f"year={year}" / f"month={month:02d}").exists()
     )
 
 
 def _discover_year_months(product: str) -> list[tuple[int, int]]:
-    """
-    Walk DATA_NORMALIZED for the given product and return all (year, month)
-    pairs that actually contain data, sorted chronologically.
-
-    Scans the Hive-partitioned directory tree:
-        DATA_NORMALIZED/provider=.../venue=.../product={product}/
-            contract=.../year={Y}/month={M}/
-
-    Deduplicates across contracts — only unique (year, month) pairs returned.
-    """
-    cfg      = MARKET_CONFIG[product]
-    venue    = cfg["exchange"]
-    provider = cfg["provider"]
-    base = (
-        DATA_NORMALIZED
-        / f"provider={provider}"
-        / f"venue={venue}"
-        / f"product={product}"
-    )
-    year_months: set[tuple[int, int]] = set()
-    # Walk year=*/month=* under any contract partition
-    for ym_path in base.glob("contract=*/year=*/month=*"):
-        parts = {p.split("=")[0]: p.split("=")[1] for p in ym_path.parts if "=" in p}
+    pairs: set[tuple[int, int]] = set()
+    for path in _product_root(product).glob("contract=*/year=*/month=*"):
+        parts = {
+            token.split("=", 1)[0]: token.split("=", 1)[1]
+            for token in path.parts
+            if "=" in token
+        }
         try:
-            y = int(parts["year"])
-            m = int(parts["month"])
-            year_months.add((y, m))
+            pairs.add((int(parts["year"]), int(parts["month"])))
         except (KeyError, ValueError):
             continue
-    return sorted(year_months)
+    return sorted(pairs)
 
 
 def _resolve_contracts(
-    args    : argparse.Namespace,
-    product : str,
-    year    : int,
-    month   : int,
+    args: argparse.Namespace,
+    product: str,
+    year: int,
+    month: int,
 ) -> list[str] | None:
-    """
-    Return the list of contracts to process for a given (product, year, month).
-
-    Resolution logic:
-      - --all-data always implies full auto-discovery (no need for --all-contracts).
-      - --all-contracts triggers auto-discovery for --month and --year modes.
-      - Otherwise, args.contract must be set (validated by the caller for --date).
-
-    Returns None on error (caller should propagate return 1).
-
-    Note: product is passed explicitly (not taken from args.product) because
-    args.product is now a list and the caller iterates over it.
-    """
-    # --all-data always does full discovery — no need to pass --all-contracts explicitly
-    use_discovery = args.all_contracts or args.all_data
-
-    if use_discovery:
+    if args.all_contracts or args.all_data:
         contracts = _discover_contracts(product, year, month)
         if not contracts:
-            log.error(
-                "No contracts found for product=%s year=%d month=%d.",
-                product, year, month,
-            )
+            log.error("No contracts found for %s %d-%02d", product, year, month)
             return None
-        log.info("Discovered contracts for %s %d-%02d: %s", product, year, month, contracts)
         return contracts
-    else:
-        if not args.contract:
-            log.error(
-                "--contract is required (or use --all-contracts / --all-data)."
-            )
-            return None
-        return [args.contract]
+    if not args.contract:
+        log.error("--contract is required unless discovery is enabled")
+        return None
+    return [args.contract]
 
 
 # ---------------------------------------------------------------------------
@@ -855,210 +606,100 @@ def _resolve_contracts(
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Reconstruct MBP-1 from normalized MBO Parquet files."
-    )
-    parser.add_argument(
-        "--product", required=True, nargs="+",
-        help="Product ticker(s) (e.g. ES, or HSI HHI MHI MCH for multiple).",
-    )
-    parser.add_argument(
-        "--contract", default=None,
-        help=(
-            "Contract symbol (e.g. ESZ25). "
-            "Required for --date. Optional filter for --month/--year/--all-data."
-        ),
-    )
-    parser.add_argument(
-        "--date", default=None,
-        help="Single date YYYY-MM-DD. Mutually exclusive with --month/--year/--all-data.",
-    )
-    parser.add_argument(
-        "--month", default=None,
-        help="Month YYYY-MM. Mutually exclusive with --date/--year/--all-data.",
-    )
-    parser.add_argument(
-        "--year", default=None,
-        help=(
-            "Full year YYYY. Processes all available months and contracts. "
-            "Mutually exclusive with --date/--month/--all-data."
-        ),
-    )
-    parser.add_argument(
-        "--all-data", action="store_true",
-        help=(
-            "Process ALL available data for the product (auto-discovers "
-            "years/months/contracts). "
-            "Mutually exclusive with --date/--month/--year."
-        ),
-    )
-    parser.add_argument(
-        "--all-contracts", action="store_true",
-        help=(
-            "Auto-discover all contracts for this product/month from the "
-            "normalized directory. "
-            "Applies to --month and --year modes. Implicit for --all-data."
-        ),
-    )
-    parser.add_argument(
-        "--overwrite", action="store_true",
-        help="Overwrite existing output files (default: skip).",
-    )
+    parser = argparse.ArgumentParser(description="Reconstruct MBP-1 from canonical MBO")
+    parser.add_argument("--product", required=True, nargs="+")
+    parser.add_argument("--contract")
+    parser.add_argument("--date")
+    parser.add_argument("--month")
+    parser.add_argument("--year")
+    parser.add_argument("--all-data", action="store_true")
+    parser.add_argument("--all-contracts", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
 
-def main() -> int:
-    args = _parse_args()
+def _build_work(args: argparse.Namespace) -> list[tuple[str, str, int, int, str]] | None:
+    mode_count = sum(bool(value) for value in (args.date, args.month, args.year, args.all_data))
+    if mode_count != 1:
+        log.error("Specify exactly one of --date/--month/--year/--all-data")
+        return None
 
-    # Validate all products before starting any work
+    work: list[tuple[str, str, int, int, str]] = []
     for product in args.product:
         if product not in MARKET_CONFIG:
-            log.error("Unknown product '%s'. Add it to market_config.py.", product)
-            return 1
+            log.error("Unknown product: %s", product)
+            return None
 
-    # --- Mutual exclusion check across the four run modes ---
-    # Done once — applies identically to all products
-    mode_flags = sum([
-        bool(args.date),
-        bool(args.month),
-        bool(args.year),
-        bool(args.all_data),
-    ])
-    if mode_flags > 1:
-        log.error("--date, --month, --year and --all-data are mutually exclusive.")
-        return 1
-    if mode_flags == 0:
-        log.error("Specify one of --date, --month, --year or --all-data.")
-        return 1
-
-    # Build the full work list across all products
-    # work list: (product, contract, year, month, date_str)
-    work: list[tuple[str, str, int, int, str]] = []
-
-    for product in args.product:
-
-        # ------------------------------------------------------------------
-        # MODE 1 — single day
-        # ------------------------------------------------------------------
         if args.date:
             if not args.contract:
-                log.error("--contract is required when --date is specified.")
-                return 1
-            try:
-                d     = date.fromisoformat(args.date)
-                d_str = d.strftime("%Y%m%d")
-            except ValueError:
-                log.error("Invalid date format '%s'. Expected YYYY-MM-DD.", args.date)
-                return 1
-            work.append((product, args.contract, d.year, d.month, d_str))
+                log.error("--contract is required with --date")
+                return None
+            session_date = date.fromisoformat(args.date)
+            work.append(
+                (
+                    product,
+                    args.contract,
+                    session_date.year,
+                    session_date.month,
+                    session_date.strftime("%Y%m%d"),
+                )
+            )
+            continue
 
-        # ------------------------------------------------------------------
-        # MODE 2 — single month
-        # ------------------------------------------------------------------
-        elif args.month:
-            try:
-                month_date = datetime.strptime(args.month, "%Y-%m")
-                year, month = month_date.year, month_date.month
-            except ValueError:
-                log.error("Invalid month format '%s'. Expected YYYY-MM.", args.month)
-                return 1
+        if args.month:
+            month_date = datetime.strptime(args.month, "%Y-%m")
+            pairs = [(month_date.year, month_date.month)]
+        elif args.year:
+            target_year = int(args.year)
+            pairs = [pair for pair in _discover_year_months(product) if pair[0] == target_year]
+        else:
+            pairs = _discover_year_months(product)
 
+        for year, month in pairs:
             contracts = _resolve_contracts(args, product, year, month)
             if contracts is None:
-                return 1
-
+                return None
             for contract in contracts:
                 for _, date_str in _iter_mbo_files(product, contract, year, month):
                     work.append((product, contract, year, month, date_str))
 
-        # ------------------------------------------------------------------
-        # MODE 3 — full year
-        # ------------------------------------------------------------------
-        elif args.year:
-            try:
-                year = int(args.year)
-                if not (2000 <= year <= 2100):
-                    raise ValueError
-            except ValueError:
-                log.error("Invalid year '%s'. Expected YYYY.", args.year)
-                return 1
+    return work
 
-            all_ym      = _discover_year_months(product)
-            year_months = [(y, m) for y, m in all_ym if y == year]
 
-            if not year_months:
-                log.warning("No data found for product=%s year=%d.", product, year)
-                continue
-
-            log.info(
-                "Year %d — product=%s — found %d month(s): %s",
-                year, product, len(year_months), year_months,
-            )
-
-            for y, m in year_months:
-                contracts = _resolve_contracts(args, product, y, m)
-                if contracts is None:
-                    return 1
-                for contract in contracts:
-                    for _, date_str in _iter_mbo_files(product, contract, y, m):
-                        work.append((product, contract, y, m, date_str))
-
-        # ------------------------------------------------------------------
-        # MODE 4 — all available data
-        # ------------------------------------------------------------------
-        elif args.all_data:
-            all_ym = _discover_year_months(product)
-
-            if not all_ym:
-                log.warning("No data found for product=%s.", product)
-                continue
-
-            log.info(
-                "all-data — product=%s — found %d (year, month) pair(s): %s",
-                product, len(all_ym), all_ym,
-            )
-
-            for y, m in all_ym:
-                contracts = _resolve_contracts(args, product, y, m)
-                if contracts is None:
-                    return 1
-                for contract in contracts:
-                    for _, date_str in _iter_mbo_files(product, contract, y, m):
-                        work.append((product, contract, y, m, date_str))
-
-    # ------------------------------------------------------------------
-    # Execution loop — processes all products sequentially
-    # ------------------------------------------------------------------
+def main() -> int:
+    args = _parse_args()
+    try:
+        work = _build_work(args)
+    except ValueError as exc:
+        log.error("Invalid CLI value: %s", exc)
+        return 1
+    if work is None:
+        return 1
     if not work:
-        log.warning("No files to process.")
+        log.warning("No files to process")
         return 0
 
-    log.info("Reconstruction plan: %d file(s) to process.", len(work))
-
     n_ok = n_skip = n_fail = 0
-
     for product, contract, year, month, date_str in work:
-        out      = _out_path(product, contract, year, month, date_str)
-        norm_dir = _normalized_dir(product, contract, year, month)
-        mbo_file = norm_dir / f"{contract}_{date_str}_mbo.parquet"
+        mbo_file = _normalized_dir(product, contract, year, month) / f"{contract}_{date_str}_mbo.parquet"
+        out_file = _out_path(product, contract, year, month, date_str)
 
         if not mbo_file.exists():
-            log.warning("[SKIP] MBO file not found: %s", mbo_file)
+            log.warning("[SKIP] missing %s", mbo_file)
+            n_skip += 1
+            continue
+        if out_file.exists() and not args.overwrite:
             n_skip += 1
             continue
 
-        if out.exists() and not args.overwrite:
-            log.info("[SKIP] Output already exists: %s", out.name)
-            n_skip += 1
-            continue
-
-        log.info("[START] %s %s %s", product, contract, date_str)
         try:
-            stats = reconstruct_day(mbo_file, out, product, contract)
+            stats = reconstruct_day(mbo_file, out_file, product, contract)
             log.info(
-                "[DONE]  %s %s %s — "
-                "events=%d  rows=%d  orphan_cancel=%d  orphan_modify=%d  %.1fs",
-                product, contract, date_str,
+                "[DONE] %s %s %s events=%d rows=%d orphan_cancel=%d "
+                "orphan_modify=%d %.1fs",
+                product,
+                contract,
+                date_str,
                 stats["n_events"],
                 stats["n_rows_emitted"],
                 stats["n_orphan_cancel"],
@@ -1067,16 +708,13 @@ def main() -> int:
             )
             n_ok += 1
         except Exception:
-            log.exception("[FAIL]  %s %s %s", product, contract, date_str)
+            log.exception("[FAIL] %s %s %s", product, contract, date_str)
             n_fail += 1
 
-    log.info(
-        "Summary: %d processed, %d skipped, %d failed.",
-        n_ok, n_skip, n_fail,
-    )
+    log.info("Summary: %d processed, %d skipped, %d failed", n_ok, n_skip, n_fail)
     return 0 if n_fail == 0 else 1
 
 
 if __name__ == "__main__":
     setup_logging()
-    sys.exit(main())
+    raise SystemExit(main())

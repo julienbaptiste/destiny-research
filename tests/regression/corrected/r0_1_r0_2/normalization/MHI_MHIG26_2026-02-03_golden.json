@@ -1,0 +1,93 @@
+{
+  "checksum_columns": [
+    "ts_event",
+    "ts_recv",
+    "action",
+    "side",
+    "price",
+    "size",
+    "order_id",
+    "flags",
+    "norm_flags",
+    "sequence",
+    "subsequence"
+  ],
+  "classification": "EXPECTED_CHANGE",
+  "contract": "MHIG26",
+  "date": "2026-02-03",
+  "decision_ref": "ADR-003/ADR-004",
+  "diff_signature": "c5e5c42ab7dd1be4be1e26f5a1c8c2953bceb2988031f4fe589771913b3eb3da",
+  "evidence_candidate_commit": "c731de7f41769a7234778e911a101a4afa4b07c5",
+  "format_version": 1,
+  "full_fingerprint": {
+    "batch_size": 100000,
+    "columns": [
+      "ts_event",
+      "ts_recv",
+      "venue",
+      "product",
+      "contract",
+      "action",
+      "side",
+      "price",
+      "size",
+      "order_id",
+      "flags",
+      "norm_flags",
+      "sequence",
+      "subsequence",
+      "publisher_id",
+      "instrument_id"
+    ],
+    "file_sha256": "8bfe99453339a1d71458dde751c69eb0dc5a73b2d2b0be46d010fd0ff1d1fdb9",
+    "file_size_bytes": 84816351,
+    "row_count": 7140532,
+    "rows_hashed": 7140532,
+    "schema": "ts_event: uint64 not null\nts_recv: uint64 not null\nvenue: dictionary<values=string, indices=int8, ordered=0> not null\nproduct: dictionary<values=string, indices=int8, ordered=0> not null\ncontract: dictionary<values=string, indices=int16, ordered=0> not null\naction: dictionary<values=string, indices=int8, ordered=0> not null\nside: dictionary<values=string, indices=int8, ordered=0> not null\nprice: int64 not null\nsize: uint32 not null\norder_id: uint64 not null\nflags: uint8 not null\nnorm_flags: uint16 not null\nsequence: uint32 not null\nsubsequence: uint16 not null\npublisher_id: uint16 not null\ninstrument_id: uint32 not null",
+    "semantic_sha256": "a3324391efef8ee05deec429b7a98abe1707ad9a966ef1f4704a2223680fa8b7"
+  },
+  "golden_namespace": "corrected/r0_1_r0_2",
+  "kind": "mbo",
+  "product": "MHI",
+  "reject_reason_distribution": {
+    "ORPHAN_CANCEL": 134
+  },
+  "rejected_fingerprint": {
+    "batch_size": 100000,
+    "columns": [
+      "ts_event",
+      "ts_recv",
+      "venue",
+      "product",
+      "contract",
+      "action",
+      "side",
+      "price",
+      "size",
+      "order_id",
+      "flags",
+      "norm_flags",
+      "sequence",
+      "subsequence",
+      "publisher_id",
+      "instrument_id",
+      "reject_reason",
+      "mode"
+    ],
+    "file_sha256": "20114d063e491cd72350b4d5616a0c2752af70c7c61d372426a72307e4da15c7",
+    "file_size_bytes": 6285,
+    "row_count": 134,
+    "rows_hashed": 134,
+    "schema": "ts_event: uint64 not null\nts_recv: uint64 not null\nvenue: dictionary<values=string, indices=int8, ordered=0> not null\nproduct: dictionary<values=string, indices=int8, ordered=0> not null\ncontract: dictionary<values=string, indices=int16, ordered=0> not null\naction: dictionary<values=string, indices=int8, ordered=0>\nside: dictionary<values=string, indices=int8, ordered=0>\nprice: int64\nsize: uint32\norder_id: uint64\nflags: uint8\nnorm_flags: uint16\nsequence: uint32\nsubsequence: uint16\npublisher_id: uint16\ninstrument_id: uint32\nreject_reason: string not null\nmode: string not null",
+    "semantic_sha256": "84edc3a2098132f7958fc34ce18837f55a993f9d46f272c9c968484fc67bc800"
+  },
+  "sample_checksum_sha256": "2f25b5b8ff8e48b90089688fb0f011d37885b57fe184f260dbf412178a632d18",
+  "sample_rows_used": 50000,
+  "validator_stats": {
+    "date": "20260203",
+    "mode": "LOOSE",
+    "n_rejected": 134,
+    "n_validated": 7140532,
+    "n_warmup_skip": 0
+  }
+}

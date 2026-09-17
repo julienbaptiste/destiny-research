@@ -1,0 +1,90 @@
+{
+  "reviewed_against_candidate_commit": "c731de7f41769a7234778e911a101a4afa4b07c5",
+  "reviewed_date": "2026-09-17",
+  "classifications": {
+    "ES": {
+      "mbo": {
+        "diff_signature": "d7301565e5850d4451a7f9cc2490ec1705671935047022fbd855f30fada923f7",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003",
+        "note": "Row count is unchanged. Sampled common-field differences are flags-only and reflect corrected Databento provider-bit assignments; canonical norm_flags and subsequence are added by the schema migration."
+      },
+      "mbp1": {
+        "diff_signature": "f6947f7c9c7fc0b10da8a71bb6de66fcf75b45547e6c53efabdda996f7cb552f",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003",
+        "note": "Row count and every legacy/common MBP1 field are unchanged; the semantic fingerprint differs only because subsequence was added to the canonical MBP1 schema."
+      }
+    },
+    "NIY": {
+      "mbo": {
+        "diff_signature": "d0e0d264e15d95621fe399836e9d94e7c07cc0588eadcd3d84004ba1e7536566",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003",
+        "note": "Row count is unchanged. Sampled common-field differences are flags-only and reflect corrected Databento provider-bit assignments; canonical norm_flags and subsequence are added by the schema migration."
+      },
+      "mbp1": {
+        "diff_signature": "01c35a096e76b66c45bdacf185376dae440dcf869cd9625cae0130d793230dcb",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003",
+        "note": "Row count is unchanged. Sampled common-field differences are flags-only, including preservation of the Databento provider-specific 0x02 bit; subsequence is added to MBP1."
+      }
+    },
+    "FDAX": {
+      "mbo": {
+        "diff_signature": "73eb09a5a54b237d212d387c9848b43390ad4dd6650e70adcd8e17e5cf437475",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003",
+        "note": "Row count is unchanged. The two sampled common-field differences are flags-only and reflect corrected Databento provider-bit assignments; norm_flags and subsequence are added canonically."
+      },
+      "mbp1": {
+        "diff_signature": "26a82e3b5bd9ccacf0f780e06cf424bf8e1eb5e6d103f9e30fadc63bfb0e70f2",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003",
+        "note": "Row count and every legacy/common MBP1 field are unchanged; the semantic fingerprint differs only because subsequence was added to the canonical MBP1 schema."
+      }
+    },
+    "FESX": {
+      "mbo": {
+        "diff_signature": "1b425225e60184678fadf684ed9d3fbcd269258ed2cac93ddc25b6ffeede3b93",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003",
+        "note": "Row count is unchanged. The two sampled common-field differences are flags-only and reflect corrected Databento provider-bit assignments; norm_flags and subsequence are added canonically."
+      },
+      "mbp1": {
+        "diff_signature": "525887c367b18cbad9f5cd68c37f9c60e5864d9dee7ede42bf3bf44c901b82ba",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003",
+        "note": "Row count and every legacy/common MBP1 field are unchanged; the semantic fingerprint differs only because subsequence was added to the canonical MBP1 schema."
+      }
+    },
+    "HSI": {
+      "mbo": {
+        "diff_signature": "2a3567bcc3e11b0c2434b9c817a9e97c419f62e7e12b8f22bbc6c67d8323286d",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003/ADR-004",
+        "note": "Expected HKEX stream expansion from retained printable order_id=0 trades, identified Trade350 expansion to TRADE/FILL/CANCEL, removal of canonical Delete+Add-to-MODIFY inference, and explicit provenance/subsequence. No trade-size overruns were observed; orphan cancels remain 124."
+      },
+      "mbp1": {
+        "diff_signature": "6df0e4d12ba1cbd5dc4273ba460c453f309cd9252f07d853330be62449407fab",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003/ADR-004",
+        "note": "Expected downstream MBP1 change from the corrected HKEX canonical event stream and atomic F_LAST semantics. No trade-size overruns were observed; reconstruction orphan cancels remain 124."
+      }
+    },
+    "MHI": {
+      "mbo": {
+        "diff_signature": "c5e5c42ab7dd1be4be1e26f5a1c8c2953bceb2988031f4fe589771913b3eb3da",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003/ADR-004",
+        "note": "Expected HKEX stream expansion from retained printable order_id=0 trades, identified Trade350 expansion to TRADE/FILL/CANCEL, removal of canonical Delete+Add-to-MODIFY inference, and explicit provenance/subsequence. No trade-size overruns were observed; orphan cancels remain 134."
+      },
+      "mbp1": {
+        "diff_signature": "4399f31fca77cf0e85e014be40c16c885bc23944bc0700e790e872d360d71ded",
+        "classification": "EXPECTED_CHANGE",
+        "decision_ref": "ADR-003/ADR-004",
+        "note": "Expected downstream MBP1 change from the corrected HKEX canonical event stream and atomic F_LAST semantics. No trade-size overruns were observed; reconstruction orphan cancels remain 134."
+      }
+    }
+  }
+}

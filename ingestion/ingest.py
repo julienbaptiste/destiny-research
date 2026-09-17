@@ -1,65 +1,25 @@
 """
-ingest.py — Ingestion orchestrator: RAW → NORMALIZED.
+ingest.py — streaming RAW -> canonical normalized MBO orchestrator.
 
-This is the top-level entry point for the ingestion pipeline.
-It coordinates the adapter, validator, and Parquet writers to produce
-normalized MBO parquet files from raw provider-specific feeds.
-
-Pipeline per file:
-    1. Open adapter session (load raw file, build instrument map)
-    2. List all instruments in the file → create per-instrument writers
-    3. Stream events through adapter.translate() → validator.validate_event()
-    4. Route clean events to per-instrument Parquet writers
-    5. Write rejected events to per-instrument audit logs
-    6. Log end-of-session stats
-
-Output layout (per instrument, per day):
-    data/normalized/provider=databento/venue=CME/product=ES/contract=ESZ25/
-        year=2025/month=10/ESZ25_20251027_mbo.parquet
-    data/normalized/provider=databento/venue=CME/product=ES/contract=ESZ25/
-        year=2025/month=10/ESZ25_20251027_rejected.parquet
-
-Design decisions:
-    - One ParquetWriter per (contract, rejected/clean) pair, opened lazily
-      on first event for that contract. This avoids creating empty files
-      for contracts that have zero events on a given day.
-    - Events are buffered in memory (BATCH_SIZE rows) before flushing to
-      Parquet. This amortizes the Arrow conversion cost.
-    - Warmup events (F_SNAPSHOT) are written to the clean output with their
-      flags intact. They are NOT filtered out — the reconstruction engine
-      uses them to bootstrap book state. The validator runs in warmup_mode
-      during this phase (orphan CANCELs silently ignored).
-    - On CLEAR action: validator state is reset, warmup_mode stays False
-      (mid-session CLEAR is not a warmup event).
-
-Memory management:
-    - Buffers are flushed every BATCH_SIZE events and cleared.
-    - Peak memory per instrument = BATCH_SIZE × ~200 bytes ≈ 100MB at 500k.
-    - With 10+ instruments per file, keep BATCH_SIZE ≤ 100_000 on 16GB RAM.
-
-TODO (logging cleanup):
-    - Remove the `verbose` parameter from ingest_file() and ingest_product()
-      once we decide to fully commit to log-level-based verbosity control.
-      Detailed messages (registered instruments, warmup ended, already
-      normalized skipping) should become log.debug() calls, controllable
-      via setup_logging(level=logging.DEBUG) without touching call sites.
+The orchestrator is provider-agnostic. Adapters own source translation,
+validator.py owns canonical validation policy, and this module owns bounded
+Parquet buffering plus session lifecycle.
 """
 
 from __future__ import annotations
 
-import logging
-import sys
-from collections import defaultdict
+import argparse
 from datetime import date
+import logging
+import os
 from pathlib import Path
-from typing import Iterator
+import re
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .adapters.base import BaseAdapter, ContractInfo, SessionConfig
 from .schema import (
-    Action,
     Flags,
     ValidationMode,
     NORMALIZED_MBO_SCHEMA,
@@ -67,86 +27,66 @@ from .schema import (
     normalized_path,
     rejected_path,
 )
-from .validator import ValidatorState, validate_event, log_stats
+from .validator import (
+    ValidatorState,
+    _build_rejected_row,
+    log_stats,
+    mark_validation_anomaly,
+    validate_event,
+)
 
-# Module-level logger — never call setup_logging() from here.
-# setup_logging() is called once in the if __name__ == "__main__" block.
 log = logging.getLogger(__name__)
 
+BATCH_SIZE = 100_000
+PARQUET_COMPRESSION = "zstd"
+PARQUET_COMPRESSION_LVL = 3
 
-# ---------------------------------------------------------------------------
-# CONSTANTS
-# ---------------------------------------------------------------------------
-
-# Number of events to buffer before flushing to Parquet.
-# Tuned for 16GB RAM with up to ~15 simultaneous instrument writers.
-# Each event dict ≈ 150-200 bytes → 100k × 200B × 15 instruments ≈ 300MB peak.
-BATCH_SIZE: int = 100_000
-
-# Parquet compression — zstd level 3 is a good balance for tick data:
-# better ratio than snappy, faster than gzip, negligible CPU overhead.
-PARQUET_COMPRESSION     : str = "zstd"
-PARQUET_COMPRESSION_LVL : int = 3
-
-
-# ---------------------------------------------------------------------------
-# WRITER CONTEXT
-# ---------------------------------------------------------------------------
 
 class _WriterContext:
-    """
-    Holds open Parquet writers and event buffers for one contract.
-
-    Opened lazily on first event — avoids empty files for contracts
-    with no events on a given day.
-
-    Flushed every BATCH_SIZE events and on close().
-    """
+    """Bounded clean/rejected buffers and lazy Parquet writers for one contract."""
 
     __slots__ = (
-        "clean_writer", "rejected_writer",
-        "clean_buf", "rejected_buf",
-        "clean_path", "rejected_path",
-        "n_clean", "n_rejected",
+        "clean_writer",
+        "rejected_writer",
+        "clean_buf",
+        "rejected_buf",
+        "clean_path",
+        "rejected_path",
+        "n_clean",
+        "n_rejected",
     )
 
-    def __init__(
-        self,
-        clean_path    : Path,
-        rejected_path : Path,
-    ) -> None:
-        self.clean_path    = clean_path
-        self.rejected_path = rejected_path
-
-        # Writers opened lazily on first write
-        self.clean_writer    : pq.ParquetWriter | None = None
-        self.rejected_writer : pq.ParquetWriter | None = None
-
-        self.clean_buf    : list[dict] = []
-        self.rejected_buf : list[dict] = []
-
-        self.n_clean    : int = 0
-        self.n_rejected : int = 0
+    def __init__(self, clean_path: Path, rejected_path_: Path) -> None:
+        self.clean_path = clean_path
+        self.rejected_path = rejected_path_
+        self.clean_writer: pq.ParquetWriter | None = None
+        self.rejected_writer: pq.ParquetWriter | None = None
+        self.clean_buf: list[dict] = []
+        self.rejected_buf: list[dict] = []
+        self.n_clean = 0
+        self.n_rejected = 0
 
     def _ensure_clean_writer(self) -> None:
-        if self.clean_writer is None:
-            self.clean_path.parent.mkdir(parents=True, exist_ok=True)
-            self.clean_writer = pq.ParquetWriter(
-                self.clean_path,
-                NORMALIZED_MBO_SCHEMA,
-                compression=PARQUET_COMPRESSION,
-                compression_level=PARQUET_COMPRESSION_LVL,
-            )
+        if self.clean_writer is not None:
+            return
+        self.clean_path.parent.mkdir(parents=True, exist_ok=True)
+        self.clean_writer = pq.ParquetWriter(
+            self.clean_path,
+            NORMALIZED_MBO_SCHEMA,
+            compression=PARQUET_COMPRESSION,
+            compression_level=PARQUET_COMPRESSION_LVL,
+        )
 
     def _ensure_rejected_writer(self) -> None:
-        if self.rejected_writer is None:
-            self.rejected_path.parent.mkdir(parents=True, exist_ok=True)
-            self.rejected_writer = pq.ParquetWriter(
-                self.rejected_path,
-                REJECTED_EVENTS_SCHEMA,
-                compression=PARQUET_COMPRESSION,
-                compression_level=PARQUET_COMPRESSION_LVL,
-            )
+        if self.rejected_writer is not None:
+            return
+        self.rejected_path.parent.mkdir(parents=True, exist_ok=True)
+        self.rejected_writer = pq.ParquetWriter(
+            self.rejected_path,
+            REJECTED_EVENTS_SCHEMA,
+            compression=PARQUET_COMPRESSION,
+            compression_level=PARQUET_COMPRESSION_LVL,
+        )
 
     def append_clean(self, event: dict) -> None:
         self.clean_buf.append(event)
@@ -154,8 +94,8 @@ class _WriterContext:
         if len(self.clean_buf) >= BATCH_SIZE:
             self.flush_clean()
 
-    def append_rejected(self, row: dict) -> None:
-        self.rejected_buf.append(row)
+    def append_rejected(self, event: dict) -> None:
+        self.rejected_buf.append(event)
         self.n_rejected += 1
         if len(self.rejected_buf) >= BATCH_SIZE:
             self.flush_rejected()
@@ -164,6 +104,7 @@ class _WriterContext:
         if not self.clean_buf:
             return
         self._ensure_clean_writer()
+        assert self.clean_writer is not None
         table = pa.Table.from_pylist(self.clean_buf, schema=NORMALIZED_MBO_SCHEMA)
         self.clean_writer.write_table(table)
         self.clean_buf.clear()
@@ -172,696 +113,497 @@ class _WriterContext:
         if not self.rejected_buf:
             return
         self._ensure_rejected_writer()
+        assert self.rejected_writer is not None
         table = pa.Table.from_pylist(self.rejected_buf, schema=REJECTED_EVENTS_SCHEMA)
         self.rejected_writer.write_table(table)
         self.rejected_buf.clear()
 
     def close(self) -> None:
-        """Flush remaining buffers and close writers."""
+        """Flush all accepted rows and finalize both Parquet files."""
         self.flush_clean()
         self.flush_rejected()
-        if self.clean_writer:
+        if self.clean_writer is not None:
             self.clean_writer.close()
-        if self.rejected_writer:
+            self.clean_writer = None
+        if self.rejected_writer is not None:
             self.rejected_writer.close()
+            self.rejected_writer = None
 
+    def abort(self) -> None:
+        """Discard buffers and remove any partially written session outputs."""
+        self.clean_buf.clear()
+        self.rejected_buf.clear()
 
-# ---------------------------------------------------------------------------
-# REJECTED ROW BUILDER
-# ---------------------------------------------------------------------------
+        # Closing writes Parquet footers, so partial files may become readable.
+        # They must therefore be removed unconditionally after an aborted run.
+        for writer_name in ("clean_writer", "rejected_writer"):
+            writer = getattr(self, writer_name)
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:
+                    log.exception("Failed to close aborted %s", writer_name)
+                setattr(self, writer_name, None)
 
-def _build_rejected_row(event: dict, reason: str, mode: str) -> dict:
-    """
-    Build a row for the rejected events audit log from a normalized event dict.
-    All fields nullable — a malformed event may be missing some fields.
-    """
-    return {
-        "ts_event"      : event.get("ts_event",      0),
-        "ts_recv"       : event.get("ts_recv",        0),
-        "venue"         : event.get("venue",          ""),
-        "product"       : event.get("product",        ""),
-        "contract"      : event.get("contract",       ""),
-        "action"        : event.get("action",         None),
-        "side"          : event.get("side",           None),
-        "price"         : event.get("price",          None),
-        "size"          : event.get("size",           None),
-        "order_id"      : event.get("order_id",       None),
-        "flags"         : event.get("flags",          None),
-        "sequence"      : event.get("sequence",       None),
-        "publisher_id"  : event.get("publisher_id",   None),
-        "instrument_id" : event.get("instrument_id",  None),
-        "reject_reason" : reason,
-        "mode"          : mode,
-    }
+        for path in (self.clean_path, self.rejected_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                log.exception("Failed to remove partial ingestion output %s", path)
 
-
-# ---------------------------------------------------------------------------
-# CORE INGESTION FUNCTION
-# ---------------------------------------------------------------------------
 
 def ingest_file(
-    adapter       : BaseAdapter,
-    raw_path      : Path,
+    adapter: BaseAdapter,
+    raw_path: Path,
     normalized_dir: Path,
-    session_date  : date,
-    mode          : str = ValidationMode.STRICT,
-    verbose       : bool = True,
+    session_date: date,
+    mode: str = ValidationMode.STRICT,
+    verbose: bool = True,
 ) -> dict[str, int]:
-    """
-    Ingest one raw provider file into normalized Parquet files.
-
-    Args:
-        adapter:        Initialized adapter instance (DatabentoAdapter, etc.)
-        raw_path:       Path to the raw provider file (.dbn.zst, etc.)
-        normalized_dir: Root of the normalized data tree
-                        (e.g. Path("/media/julien/HDD/data/normalized"))
-        session_date:   Calendar date of this file (used for symbol resolution
-                        and output path construction)
-        mode:           ValidationMode.STRICT or ValidationMode.LOOSE
-        verbose:        Log progress and stats (passed through to helpers)
-
-    Returns:
-        dict: per-contract event counts {"ESZ25": 1_234_567, ...}
-
-    Raises:
-        FileNotFoundError: if raw_path does not exist
-        AssertionError:    if adapter session lifecycle is violated
-    """
+    """Stream one provider session into per-contract canonical Parquet files."""
     if not raw_path.exists():
-        raise FileNotFoundError(f"Raw file not found: {raw_path}")
+        raise FileNotFoundError(f"Raw source not found: {raw_path}")
 
-    provider  = adapter.PROVIDER
-    date_str  = session_date.strftime("%Y%m%d")
-    year      = session_date.year
-    month     = session_date.month
+    provider = adapter.PROVIDER
+    date_str = session_date.strftime("%Y%m%d")
+    year = session_date.year
+    month = session_date.month
 
-    # ------------------------------------------------------------------
-    # 1. Open adapter session
-    # ------------------------------------------------------------------
     config = SessionConfig(
-        session_date    = session_date,
-        warmup_enabled  = True,   # always enable — adapter detects via F_SNAPSHOT
-        validation_mode = mode,
+        session_date=session_date,
+        warmup_enabled=True,
+        validation_mode=mode,
     )
     adapter.open_session(raw_path, config)
 
-    if verbose:
-        log.info("%s | %s | %s | mode=%s", provider, raw_path.name, session_date, mode)
+    instruments: dict[int, ContractInfo] = {}
+    writer_ctx: dict[str, _WriterContext] = {}
+    validator_states: dict[str, ValidatorState] = {}
 
-    # ------------------------------------------------------------------
-    # 2. Pre-build instrument map from metadata
-    #    Falls back to lazy resolution if list_instruments() returns empty.
-    # ------------------------------------------------------------------
-    instruments    : dict[int, ContractInfo]  = {}  # instrument_id → ContractInfo
-    writer_ctx     : dict[str, _WriterContext] = {}  # contract → _WriterContext
-    validator_states: dict[str, ValidatorState] = {}  # contract → ValidatorState
+    n_total = 0
+    n_dropped = 0
+    completed = False
 
-    known_contracts = adapter.list_instruments()
-    for info in known_contracts:
-        _register_instrument(
-            info, provider, normalized_dir, date_str, year, month,
-            mode, instruments, writer_ctx, validator_states, verbose,
-        )
-
-    if verbose:
-        log.info("  %d instruments found in metadata", len(known_contracts))
-
-    # ------------------------------------------------------------------
-    # 3. Stream events
-    # ------------------------------------------------------------------
-    n_total   = 0
-    n_dropped = 0  # None from adapter (heartbeats, non-MBO records)
-
-    for event in adapter.iter_events():
-
-        # adapter.translate() returns None for irrelevant records
-        if event is None:
-            n_dropped += 1
-            continue
-
-        n_total += 1
-        instrument_id = event.get("instrument_id", 0)
-        contract      = event.get("contract", "")
-
-        # Lazy instrument registration — handles contracts not in metadata
-        if instrument_id not in instruments:
-            info = adapter.resolve_contract(instrument_id, session_date)
-            if info is None:
-                # Truly unknown instrument — skip silently
-                n_dropped += 1
-                continue
+    try:
+        for info in adapter.list_instruments():
             _register_instrument(
-                info, provider, normalized_dir, date_str, year, month,
-                mode, instruments, writer_ctx, validator_states, verbose,
+                info,
+                provider,
+                normalized_dir,
+                date_str,
+                year,
+                month,
+                mode,
+                instruments,
+                writer_ctx,
+                validator_states,
+                verbose,
             )
 
-        ctx    = writer_ctx[contract]
-        vstate = validator_states[contract]
+        if verbose:
+            log.info(
+                "%s | %s | %s | mode=%s | metadata instruments=%d",
+                provider,
+                raw_path.name,
+                session_date,
+                mode,
+                len(instruments),
+            )
 
-        # --- Warmup boundary detection ---
-        # While F_SNAPSHOT is set, we are in warmup mode.
-        # On the first non-snapshot event, signal warmup end to validator.
-        flags     = event.get("flags", 0)
-        is_warmup = bool(flags & Flags.F_SNAPSHOT)
+        for event in adapter.iter_events():
+            if event is None:
+                n_dropped += 1
+                continue
 
-        if not is_warmup and vstate.warmup_mode:
-            vstate.warmup_end()
-            if verbose:
-                log.info("  %s warmup ended (ts_event=%s)", contract, event["ts_event"])
+            n_total += 1
+            instrument_id = int(event.get("instrument_id", 0))
+            contract = str(event.get("contract", ""))
 
-        # --- Validate ---
-        is_clean, reason = validate_event(event, vstate)
+            if instrument_id not in instruments:
+                info = adapter.resolve_contract(instrument_id, session_date)
+                if info is None:
+                    n_dropped += 1
+                    continue
+                _register_instrument(
+                    info,
+                    provider,
+                    normalized_dir,
+                    date_str,
+                    year,
+                    month,
+                    mode,
+                    instruments,
+                    writer_ctx,
+                    validator_states,
+                    verbose,
+                )
 
-        if is_clean:
-            ctx.append_clean(event)
-        else:
-            rejected_row = _build_rejected_row(event, reason, mode)
-            ctx.append_rejected(rejected_row)
+            ctx = writer_ctx[contract]
+            state = validator_states[contract]
 
+            is_snapshot = bool(int(event.get("flags", 0)) & int(Flags.F_SNAPSHOT))
+            if not is_snapshot and state.warmup_mode:
+                state.warmup_end()
+                if verbose:
+                    log.debug(
+                        "%s warmup ended at ts_event=%s",
+                        contract,
+                        event["ts_event"],
+                    )
+
+            is_clean, reason = validate_event(event, state)
+            if is_clean:
+                ctx.append_clean(event)
+                continue
+
+            ctx.append_rejected(_build_rejected_row(event, reason or "UNKNOWN", mode))
             if mode == ValidationMode.LOOSE:
-                # In LOOSE mode: flag the event and keep it in clean output.
-                # F_BAD_TS (0x04) repurposed as generic anomaly flag.
-                flagged = dict(event)
-                flagged["flags"] = flags | 0x04
-                ctx.append_clean(flagged)
+                ctx.append_clean(mark_validation_anomaly(event))
 
-    # ------------------------------------------------------------------
-    # 4. Close all writers and log stats
-    # ------------------------------------------------------------------
-    counts: dict[str, int] = {}
+        # Only successful full-session iteration is allowed to finalize files.
+        for ctx in writer_ctx.values():
+            ctx.close()
+        completed = True
 
-    for contract, ctx in writer_ctx.items():
-        ctx.close()
-        counts[contract] = ctx.n_clean
+    finally:
+        if not completed:
+            for ctx in writer_ctx.values():
+                ctx.abort()
+        try:
+            adapter.close_session()
+        except Exception:
+            # Do not hide the original ingestion exception when cleanup fails.
+            if completed:
+                raise
+            log.exception("Adapter cleanup failed after aborted ingestion")
+
+    counts = {contract: ctx.n_clean for contract, ctx in writer_ctx.items()}
 
     if verbose:
         log.info(
             "  total=%s | dropped(pre-validation)=%s | instruments=%d",
-            f"{n_total:,}", f"{n_dropped:,}", len(writer_ctx),
+            f"{n_total:,}",
+            f"{n_dropped:,}",
+            len(writer_ctx),
         )
-        for contract, vstate in validator_states.items():
-            log_stats(vstate, contract, date_str)
+        for contract, state in validator_states.items():
+            log_stats(state, contract, date_str)
 
-    adapter.close_session()
     return counts
 
 
-# ---------------------------------------------------------------------------
-# BATCH INGESTION
-# ---------------------------------------------------------------------------
-
 def ingest_product(
-    adapter       : BaseAdapter,
-    raw_dir       : Path,
+    adapter: BaseAdapter,
+    raw_dir: Path,
     normalized_dir: Path,
-    mode          : str  = ValidationMode.STRICT,
-    verbose       : bool = True,
-    overwrite     : bool = False,
+    mode: str = ValidationMode.STRICT,
+    verbose: bool = True,
+    overwrite: bool = False,
 ) -> None:
-    """
-    Ingest all raw files for a product directory.
-
-    Scans raw_dir recursively for files matching the adapter's expected
-    extension (*.dbn.zst for Databento). Processes files in chronological
-    order (sorted by filename).
-
-    Args:
-        adapter:        Adapter instance — reused across files (re-opened
-                        per file via open_session/close_session).
-        raw_dir:        Product-level raw directory, e.g.:
-                        /media/julien/HDD/data/raw/provider=databento/
-                            venue=CME/product=ES/
-        normalized_dir: Root normalized directory.
-        mode:           ValidationMode.STRICT or LOOSE.
-        verbose:        Log progress per file.
-        overwrite:      If False, skip files whose normalized output already
-                        exists. Allows resuming interrupted batch runs.
-    """
-    # Collect raw files sorted chronologically.
-    # Match only MBO files — exclude mbp1, mbp10, and other schemas
-    # that may coexist in the same raw directory.
+    """Ingest all Databento-style MBO files below one product directory."""
     raw_files = sorted(raw_dir.rglob("*.mbo.dbn.zst"))
-
     if not raw_files:
-        log.warning("No .dbn.zst files found in %s", raw_dir)
+        log.warning("No .mbo.dbn.zst files found in %s", raw_dir)
         return
 
-    log.info("Found %d files to process in %s", len(raw_files), raw_dir)
-
     for raw_path in raw_files:
-        # Extract date from filename: "glbx-mdp3-20251027.mbo.dbn.zst"
         session_date = _extract_date_from_filename(raw_path)
         if session_date is None:
-            log.warning("Cannot extract date from %s — skipping", raw_path.name)
+            log.warning("Cannot extract date from %s; skipping", raw_path.name)
             continue
 
-        # Skip if output already exists and overwrite=False.
-        # Scope the search to the product subtree under normalized_dir —
-        # NOT the full tree — because multiple products share the same
-        # raw filename convention (e.g. xeur-eobi-20250502.mbo.dbn.zst
-        # exists for FDAX, FESX and FSMI simultaneously).
-        if not overwrite:
-            date_str = session_date.strftime("%Y%m%d")
-            # Extract provider/venue/product from raw_dir path components.
-            # raw_dir is e.g. .../raw/provider=databento/venue=EUREX/product=FDAX/
-            # We reconstruct the corresponding normalized product subtree.
-            provider_part = next(
-                (p for p in raw_dir.parts if p.startswith("provider=")), None
-            )
-            venue_part = next(
-                (p for p in raw_dir.parts if p.startswith("venue=")), None
-            )
-            product_part = next(
-                (p for p in raw_dir.parts if p.startswith("product=")), None
-            )
-            if provider_part and venue_part and product_part:
-                # Scoped search: only look under this specific product subtree
-                scoped_dir = (
-                    normalized_dir
-                    / provider_part
-                    / venue_part
-                    / product_part
-                )
-                existing = list(scoped_dir.rglob(f"*_{date_str}_mbo.parquet"))
-            else:
-                # Fallback: raw_dir structure doesn't match expected layout —
-                # search the full normalized tree (may cause false skips on
-                # same-named files across products, but better than crashing)
-                existing = list(normalized_dir.rglob(f"*_{date_str}_mbo.parquet"))
-            if existing:
-                if verbose:
-                    log.info("  %s → already normalized, skipping", raw_path.name)
-                continue
+        if not overwrite and _normalized_day_exists(
+            raw_dir,
+            normalized_dir,
+            session_date,
+        ):
+            if verbose:
+                log.info("%s already normalized; skipping", raw_path.name)
+            continue
 
         try:
             ingest_file(
-                adapter        = adapter,
-                raw_path       = raw_path,
-                normalized_dir = normalized_dir,
-                session_date   = session_date,
-                mode           = mode,
-                verbose        = verbose,
+                adapter=adapter,
+                raw_path=raw_path,
+                normalized_dir=normalized_dir,
+                session_date=session_date,
+                mode=mode,
+                verbose=verbose,
             )
-        except Exception as exc:
-            # Log error and continue — do not abort the batch
-            log.error("Error processing %s: %s", raw_path.name, exc)
-            # Ensure adapter session is closed even on error
-            try:
-                adapter.close_session()
-            except Exception:
-                pass
+        except Exception:
+            # Batch mode is intentionally best-effort across independent days.
+            # ingest_file() has already removed all partial outputs for this day.
+            log.exception("Error processing %s", raw_path)
 
-
-# ---------------------------------------------------------------------------
-# INTERNAL HELPERS
-# ---------------------------------------------------------------------------
 
 def _register_instrument(
-    info           : ContractInfo,
-    provider       : str,
-    normalized_dir : Path,
-    date_str       : str,
-    year           : int,
-    month          : int,
-    mode           : str,
-    instruments    : dict,
-    writer_ctx     : dict,
-    validator_states: dict,
-    verbose        : bool,
+    info: ContractInfo,
+    provider: str,
+    normalized_dir: Path,
+    date_str: str,
+    year: int,
+    month: int,
+    mode: str,
+    instruments: dict[int, ContractInfo],
+    writer_ctx: dict[str, _WriterContext],
+    validator_states: dict[str, ValidatorState],
+    verbose: bool,
 ) -> None:
-    """
-    Register a new instrument: create writer context and validator state.
-    Idempotent — safe to call multiple times for the same instrument.
-    """
     if info.instrument_id in instruments:
         return
 
     instruments[info.instrument_id] = info
-
-    # Only create writer/validator once per contract
-    # (multiple instrument_ids can map to the same contract — rare but possible)
     if info.contract in writer_ctx:
         return
 
-    # Build output paths
-    clean_p = normalized_path(
-        base_dir = normalized_dir,
-        provider = provider,
-        venue    = info.venue,
-        product  = info.product,
-        contract = info.contract,
-        year     = year,
-        month    = month,
-        date_str = date_str,
+    clean_path = normalized_path(
+        normalized_dir,
+        provider,
+        info.venue,
+        info.product,
+        info.contract,
+        year,
+        month,
+        date_str,
     )
-    rej_p = rejected_path(
-        base_dir = normalized_dir,
-        provider = provider,
-        venue    = info.venue,
-        product  = info.product,
-        contract = info.contract,
-        year     = year,
-        month    = month,
-        date_str = date_str,
+    rejected_file = rejected_path(
+        normalized_dir,
+        provider,
+        info.venue,
+        info.product,
+        info.contract,
+        year,
+        month,
+        date_str,
     )
 
-    writer_ctx[info.contract]       = _WriterContext(clean_p, rej_p)
+    writer_ctx[info.contract] = _WriterContext(clean_path, rejected_file)
     validator_states[info.contract] = ValidatorState(mode=mode, warmup_mode=True)
 
     if verbose:
-        label = " [SPREAD]" if info.is_spread else ""
-        log.info("  registered %s%s → %s", info.contract, label, clean_p.name)
+        spread_label = " [SPREAD]" if info.is_spread else ""
+        log.debug("registered %s%s -> %s", info.contract, spread_label, clean_path)
 
 
 def _extract_date_from_filename(path: Path) -> date | None:
-    """
-    Extract session date from a raw filename.
-
-    Supported formats:
-        "glbx-mdp3-20251027.mbo.dbn.zst"   → date(2025, 10, 27)
-        "xeur-eobi-20250507.mbo.dbn.zst"   → date(2025, 5,  7)
-
-    The date is assumed to be the 8-digit sequence in the filename stem.
-    Returns None if no 8-digit date is found.
-    """
-    import re
-    stem  = path.name  # full filename including all extensions
-    match = re.search(r"(\d{8})", stem)
+    match = re.search(r"(\d{8})", path.name)
     if not match:
         return None
     try:
-        return date(
-            int(match.group(1)[:4]),
-            int(match.group(1)[4:6]),
-            int(match.group(1)[6:8]),
+        return date.fromisoformat(
+            f"{match.group(1)[0:4]}-{match.group(1)[4:6]}-{match.group(1)[6:8]}"
         )
     except ValueError:
         return None
 
 
+def _normalized_day_exists(
+    raw_dir: Path,
+    normalized_dir: Path,
+    session_date: date,
+) -> bool:
+    date_str = session_date.strftime("%Y%m%d")
+    provider_part = next((part for part in raw_dir.parts if part.startswith("provider=")), None)
+    venue_part = next((part for part in raw_dir.parts if part.startswith("venue=")), None)
+    product_part = next((part for part in raw_dir.parts if part.startswith("product=")), None)
+
+    if provider_part and venue_part and product_part:
+        scoped = normalized_dir / provider_part / venue_part / product_part
+    else:
+        scoped = normalized_dir
+    return scoped.exists() and any(scoped.rglob(f"*_{date_str}_mbo.parquet"))
+
+
 # ---------------------------------------------------------------------------
-# CLI ENTRY POINT
+# CLI
 # ---------------------------------------------------------------------------
-#
-# Two modes:
-#
-#   Single file:
-#       python ingest.py file <path_to_file.mbo.dbn.zst> [--mode STRICT|LOOSE] [--overwrite]
-#
-#   Batch (all MBO files under a product or venue directory):
-#       python ingest.py batch --provider databento --venue CME --product ES [--mode STRICT|LOOSE] [--overwrite]
-#       python ingest.py batch --provider databento --venue CME              [--mode STRICT|LOOSE] [--overwrite]
-#       python ingest.py batch --provider databento                          [--mode STRICT|LOOSE] [--overwrite]
-#
-# DATA_ROOT is read from environment variable DESTINY_DATA_ROOT, or defaults
-# to /media/julien/HDD/data (can be overridden with --data-root).
-#
-# Examples:
-#   python ingest.py file /media/julien/HDD/data/raw/.../glbx-mdp3-20251027.mbo.dbn.zst
-#   python ingest.py batch --provider databento --venue CME --product ES
-#   python ingest.py batch --provider databento --venue CME --product ES --overwrite
-#   python ingest.py batch --provider databento --venue EUREX
 
-import argparse
-import os
-
-
-# Default data root — override with DESTINY_DATA_ROOT env var or --data-root
 _DEFAULT_DATA_ROOT = Path("/media/julien/HDD/data")
 
 
-def _get_adapter(provider: str):
-    """Return the correct adapter instance for a given provider string."""
+def _get_adapter(provider: str) -> BaseAdapter:
     from .adapters.databento_adapter import DatabentoAdapter
     from .adapters.hkex_adapter import HKEXAdapter
-    adapters = {
+
+    factories = {
         "databento": DatabentoAdapter,
         "hkex": HKEXAdapter,
+        "HKEX": HKEXAdapter,
     }
-    if provider not in adapters:
-        log.error("Unknown provider '%s'. Available: %s", provider, list(adapters))
-        sys.exit(1)
-    return adapters[provider]()
+    factory = factories.get(provider)
+    if factory is None:
+        raise ValueError(f"Unknown provider {provider!r}; available={sorted(factories)}")
+    return factory()
 
 
-def _resolve_data_root(args) -> Path:
-    """Resolve data root from CLI arg or environment variable."""
-    if hasattr(args, "data_root") and args.data_root:
+def _resolve_data_root(args: argparse.Namespace) -> Path:
+    if getattr(args, "data_root", None):
         return Path(args.data_root)
     env = os.environ.get("DESTINY_DATA_ROOT")
-    if env:
-        return Path(env)
-    return _DEFAULT_DATA_ROOT
+    return Path(env) if env else _DEFAULT_DATA_ROOT
 
 
-def _cmd_file(args) -> None:
-    """Single-file ingestion."""
+def _data_root_from_raw_path(raw_path: Path) -> Path | None:
+    """Recover the historical data root from a path containing a `data` segment."""
+    parts = raw_path.parts
+    try:
+        data_index = next(index for index, part in enumerate(parts) if part == "data")
+    except StopIteration:
+        return None
+    return Path(*parts[: data_index + 1])
+
+
+def _cmd_file(args: argparse.Namespace) -> None:
     raw_path = Path(args.path)
     if not raw_path.exists():
-        log.error("File not found: %s", raw_path)
-        sys.exit(1)
+        raise FileNotFoundError(raw_path)
 
-    # Derive provider from path (provider=databento segment)
     provider = "databento"
     for part in raw_path.parts:
         if part.startswith("provider="):
             provider = part.split("=", 1)[1]
             break
 
-    # Derive data root from path (walk up to find "data" directory)
-    parts = raw_path.parts
-    try:
-        data_idx  = next(i for i, p in enumerate(parts) if p == "data")
-        data_root = Path(*parts[:data_idx + 1])
-    except StopIteration:
-        data_root = _resolve_data_root(args)
-
-    normalized_dir = data_root / "normalized"
-    session_date   = _extract_date_from_filename(raw_path)
-
+    session_date = _extract_date_from_filename(raw_path)
     if session_date is None:
-        log.error("Cannot extract date from filename: %s", raw_path.name)
-        sys.exit(1)
+        raise ValueError(f"Cannot extract date from {raw_path.name}")
 
-    adapter = _get_adapter(provider)
-    counts  = ingest_file(
-        adapter        = adapter,
-        raw_path       = raw_path,
-        normalized_dir = normalized_dir,
-        session_date   = session_date,
-        mode           = args.mode,
-        verbose        = True,
+    data_root = _data_root_from_raw_path(raw_path) or _resolve_data_root(args)
+    counts = ingest_file(
+        adapter=_get_adapter(provider),
+        raw_path=raw_path,
+        normalized_dir=data_root / "normalized",
+        session_date=session_date,
+        mode=args.mode,
+        verbose=True,
     )
-
-    log.info("Summary:")
-    for contract, n in sorted(counts.items()):
-        log.info("  %s: %s clean events", contract, f"{n:,}")
+    for contract, count in sorted(counts.items()):
+        log.info("%s: %s clean events", contract, f"{count:,}")
 
 
-def _cmd_batch(args) -> None:
-    """
-    Batch ingestion — process all MBO files under a provider/venue/product tree.
-
-    Scope is determined by which flags are provided:
-        --product → single product directory
-        --venue only → all products under that venue
-        --provider only → all venues and products under that provider
-    """
-    data_root      = _resolve_data_root(args)
-    raw_root       = data_root / "raw"
-    normalized_dir = data_root / "normalized"
-
-    # Build the raw directory path from provided filters
-    raw_dir = raw_root / f"provider={args.provider}"
+def _cmd_batch(args: argparse.Namespace) -> None:
+    data_root = _resolve_data_root(args)
+    raw_dir = data_root / "raw" / f"provider={args.provider}"
     if args.venue:
-        raw_dir = raw_dir / f"venue={args.venue}"
+        raw_dir /= f"venue={args.venue}"
     if args.product:
-        raw_dir = raw_dir / f"product={args.product}"
-
+        raw_dir /= f"product={args.product}"
     if not raw_dir.exists():
-        log.error("Raw directory not found: %s", raw_dir)
-        sys.exit(1)
+        raise FileNotFoundError(raw_dir)
 
-    # If --product is specified: single adapter batch run
-    # Otherwise: one adapter run per product directory found
-    if args.product:
+    product_dirs = [raw_dir] if args.product else sorted(
+        directory for directory in raw_dir.rglob("product=*") if directory.is_dir()
+    )
+    if not product_dirs:
         product_dirs = [raw_dir]
-    else:
-        # Find all product= directories under the resolved path
-        product_dirs = sorted([
-            d for d in raw_dir.rglob("product=*") if d.is_dir()
-        ])
-        if not product_dirs:
-            # raw_dir itself might be the product level
-            product_dirs = [raw_dir]
-
-    log.info("Batch scope: %s", raw_dir)
-    log.info("Product directories: %d", len(product_dirs))
 
     for product_dir in product_dirs:
-        adapter = _get_adapter(args.provider)
         ingest_product(
-            adapter        = adapter,
-            raw_dir        = product_dir,
-            normalized_dir = normalized_dir,
-            mode           = args.mode,
-            verbose        = True,
-            overwrite      = args.overwrite,
+            adapter=_get_adapter(args.provider),
+            raw_dir=product_dir,
+            normalized_dir=data_root / "normalized",
+            mode=args.mode,
+            verbose=True,
+            overwrite=args.overwrite,
         )
 
 
-def _cmd_hkex(args) -> None:
-    """HKEX ingestion — one product, one date or full month."""
-    from .adapters.hkex_adapter import HKEXAdapter
+def _discover_hkex_dates(raw_month_dir: Path, product: str) -> list[str]:
+    dates: list[str] = []
+    pattern = re.compile(rf"hkex-{re.escape(product.lower())}_(\d{{8}})_orders\.parquet$")
+    for path in sorted(raw_month_dir.glob(f"hkex-{product.lower()}_*_orders.parquet")):
+        match = pattern.match(path.name)
+        if match:
+            token = match.group(1)
+            dates.append(f"{token[:4]}-{token[4:6]}-{token[6:8]}")
+    return dates
 
-    data_root      = _resolve_data_root(args)
+
+def _cmd_hkex(args: argparse.Namespace) -> None:
+    data_root = _resolve_data_root(args)
     normalized_dir = data_root / "normalized"
 
     for product in args.product:
-        # Build list of dates to process
         if args.date:
             dates = [args.date]
         else:
-            # Discover available days from raw parquet files for this product
             year, month = args.month.split("-")
-            raw_month_dir = (data_root / "raw" / "provider=HKEX" / "venue=HKEX"
-                            / f"product={product}" / f"year={year}"
-                            / f"month={month}")
-            if not raw_month_dir.exists():
-                log.error("Raw directory not found: %s", raw_month_dir)
-                sys.exit(1)
-            # Discover days from orders parquet filenames
-            orders_files = sorted(raw_month_dir.glob(
-                f"hkex-{product.lower()}_????????_orders.parquet"
-            ))
-            if not orders_files:
-                log.error("No orders parquet found in %s", raw_month_dir)
-                sys.exit(1)
-            # Extract dates from filenames: hkex-hsi_20260203_orders.parquet → 2026-02-03
-            dates = [
-                f"{f.name[len(product)+6:len(product)+10]}-"
-                f"{f.name[len(product)+10:len(product)+12]}-"
-                f"{f.name[len(product)+12:len(product)+14]}"
-                for f in orders_files
-            ]
+            raw_month_dir = (
+                data_root
+                / "raw"
+                / "provider=HKEX"
+                / "venue=HKEX"
+                / f"product={product}"
+                / f"year={year}"
+                / f"month={month}"
+            )
+            dates = _discover_hkex_dates(raw_month_dir, product)
+            if not dates:
+                raise FileNotFoundError(f"No HKEX orders files in {raw_month_dir}")
 
-        log.info("HKEX | product=%s | %d day(s) | mode=%s", product, len(dates), args.mode)
-
-        skipped = 0
         for date_str in dates:
-            year, month, day = date_str.split("-")
-            raw_dir = (data_root / "raw" / "provider=HKEX" / "venue=HKEX"
-                    / f"product={product}" / f"year={year}"
-                    / f"month={month}")
+            session_date = date.fromisoformat(date_str)
+            raw_dir = (
+                data_root
+                / "raw"
+                / "provider=HKEX"
+                / "venue=HKEX"
+                / f"product={product}"
+                / f"year={session_date.year}"
+                / f"month={session_date.month:02d}"
+            )
 
-            if not raw_dir.exists():
-                log.info("  SKIP %s — raw dir not found", date_str)
-                continue
-
-            # Skip check — use front month sentinel if known, else first contract.
-            # We check for any normalized file for this date to detect already-processed days.
-            norm_product_dir = (normalized_dir / "provider=HKEX" / "venue=HKEX"
-                                / f"product={product}")
-            existing = list(norm_product_dir.rglob(
-                f"*_{date_str.replace('-', '')}_mbo.parquet"
-            )) if norm_product_dir.exists() else []
-
+            product_norm = normalized_dir / "provider=HKEX" / "venue=HKEX" / f"product={product}"
+            token = session_date.strftime("%Y%m%d")
+            existing = list(product_norm.rglob(f"*_{token}_mbo.parquet")) if product_norm.exists() else []
             if existing and not args.overwrite:
-                log.info(
-                    "  SKIP %s — already normalized (%d contract(s)) "
-                    "(use --overwrite to reprocess)",
-                    date_str, len(existing),
-                )
-                skipped += 1
+                log.info("SKIP %s %s: already normalized", product, date_str)
                 continue
-
-            session_date = date(int(year), int(month), int(day))
-            adapter      = HKEXAdapter()
 
             counts = ingest_file(
-                adapter        = adapter,
-                raw_path       = raw_dir,
-                normalized_dir = normalized_dir,
-                session_date   = session_date,
-                mode           = args.mode,
-                verbose        = True,
+                adapter=_get_adapter("hkex"),
+                raw_path=raw_dir,
+                normalized_dir=normalized_dir,
+                session_date=session_date,
+                mode=args.mode,
+                verbose=True,
             )
-
             log.info(
-                "  %s → %s clean events across %d contract(s)",
-                date_str, f"{sum(counts.values()):,}", len(counts),
+                "%s %s -> %s clean events across %d contracts",
+                product,
+                date_str,
+                f"{sum(counts.values()):,}",
+                len(counts),
             )
-
-        log.info("Done. %d processed, %d skipped.", len(dates) - skipped, skipped)
-    log.info("All done.")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="ingest.py",
-        description="Destiny ingestion pipeline — RAW → NORMALIZED",
-    )
-    parser.add_argument(
-        "--data-root",
-        help=f"Override data root (default: $DESTINY_DATA_ROOT or {_DEFAULT_DATA_ROOT})",
-    )
-
+    parser = argparse.ArgumentParser(description="Destiny RAW -> normalized MBO ingestion")
+    parser.add_argument("--data-root")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # --- file subcommand ---
-    p_file = subparsers.add_parser("file", help="Ingest a single raw MBO file")
-    p_file.add_argument("path", help="Path to .mbo.dbn.zst file")
-    p_file.add_argument(
-        "--mode", choices=["STRICT", "LOOSE"], default="STRICT",
-        help="Validation mode (default: STRICT)",
-    )
-    p_file.add_argument(
-        "--overwrite", action="store_true",
-        help="Re-process even if normalized output already exists",
-    )
-    p_file.set_defaults(func=_cmd_file)
+    file_parser = subparsers.add_parser("file")
+    file_parser.add_argument("path")
+    file_parser.add_argument("--mode", choices=["STRICT", "LOOSE"], default="STRICT")
+    file_parser.add_argument("--overwrite", action="store_true")
+    file_parser.set_defaults(func=_cmd_file)
 
-    # --- batch subcommand ---
-    p_batch = subparsers.add_parser(
-        "batch",
-        help="Ingest all MBO files under a provider/venue/product directory",
-    )
-    p_batch.add_argument(
-        "--provider", required=True,
-        help="Provider name, e.g. databento",
-    )
-    p_batch.add_argument(
-        "--venue", default=None,
-        help="Venue filter, e.g. CME, EUREX (optional — all venues if omitted)",
-    )
-    p_batch.add_argument(
-        "--product", default=None,
-        help="Product filter, e.g. ES, FDAX (optional — all products if omitted)",
-    )
-    p_batch.add_argument(
-        "--mode", choices=["STRICT", "LOOSE"], default="STRICT",
-        help="Validation mode (default: STRICT)",
-    )
-    p_batch.add_argument(
-        "--overwrite", action="store_true",
-        help="Re-process files even if normalized output already exists",
-    )
-    p_batch.set_defaults(func=_cmd_batch)
+    batch_parser = subparsers.add_parser("batch")
+    batch_parser.add_argument("--provider", required=True)
+    batch_parser.add_argument("--venue")
+    batch_parser.add_argument("--product")
+    batch_parser.add_argument("--mode", choices=["STRICT", "LOOSE"], default="STRICT")
+    batch_parser.add_argument("--overwrite", action="store_true")
+    batch_parser.set_defaults(func=_cmd_batch)
 
-    # --- hkex subcommand ---
-    p_hkex = subparsers.add_parser("hkex", help="Ingest HKEX raw parquet for one product/date")
-    p_hkex.add_argument("--product", required=True, nargs="+",
-                        help="Product code(s), e.g. HSI MHI HHI MCH")
-    date_group = p_hkex.add_mutually_exclusive_group(required=True)
-    date_group.add_argument("--date",
-                        help="Single trading date YYYY-MM-DD, e.g. 2026-02-03")
-    date_group.add_argument("--month",
-                        help="Full month YYYY-MM, e.g. 2026-02 — processes all available days")
-    p_hkex.add_argument("--mode", choices=["STRICT", "LOOSE"], default="LOOSE",
-                        help="Validation mode (default: LOOSE)")
-    p_hkex.add_argument("--overwrite", action="store_true",
-                        help="Re-process even if normalized output already exists")
-    p_hkex.set_defaults(func=_cmd_hkex)
+    hkex_parser = subparsers.add_parser("hkex")
+    hkex_parser.add_argument("--product", required=True, nargs="+")
+    date_group = hkex_parser.add_mutually_exclusive_group(required=True)
+    date_group.add_argument("--date")
+    date_group.add_argument("--month")
+    hkex_parser.add_argument("--mode", choices=["STRICT", "LOOSE"], default="LOOSE")
+    hkex_parser.add_argument("--overwrite", action="store_true")
+    hkex_parser.set_defaults(func=_cmd_hkex)
 
     args = parser.parse_args()
     args.func(args)
@@ -869,5 +611,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     from utils.logging_config import setup_logging
+
     setup_logging()
     main()

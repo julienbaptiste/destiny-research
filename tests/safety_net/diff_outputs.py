@@ -1,10 +1,10 @@
 """Bounded-memory semantic diff for baseline-vs-candidate Parquet outputs.
 
-The runner first compares deep semantic fingerprints. When they differ, it scans
-fixed-size Arrow batches in lockstep, hashes each batch, and materializes rows
-only for differing batches. Reports are intentionally UNCLASSIFIED until a
-human-authored classification manifest binds the exact diff signature to either
-EXPECTED_CHANGE or UNEXPECTED_REGRESSION.
+The migration runner must compare a legacy baseline against a candidate whose
+schema can intentionally evolve. Each side therefore receives a full logical
+fingerprint, while row diagnostics operate on the canonical columns available
+on both sides. Candidate omission of a required canonical column is an error;
+baseline omissions are reported as schema evolution rather than rejected.
 """
 
 from __future__ import annotations
@@ -26,10 +26,7 @@ sys.path.insert(0, str(_REPO_ROOT / "tests" / "regression"))
 
 from ingestion.schema import NORMALIZED_MBO_SCHEMA  # noqa: E402
 from reconstruction.build_mbp1 import MBP1_SCHEMA  # noqa: E402
-from shared.fingerprint import (  # noqa: E402
-    DEFAULT_BATCH_SIZE,
-    semantic_parquet_fingerprint,
-)
+from shared.fingerprint import DEFAULT_BATCH_SIZE, semantic_parquet_fingerprint  # noqa: E402
 
 
 _KIND_COLUMNS = {
@@ -40,14 +37,13 @@ _VALID_CLASSIFICATIONS = {"EXPECTED_CHANGE", "UNEXPECTED_REGRESSION"}
 
 
 def _batch_hash(batch: pa.RecordBatch, columns: list[str]) -> str:
-    """Hash one logical Arrow batch with dictionary values decoded to strings."""
     h = hashlib.sha256()
     h.update(f"rows={len(batch)}\n".encode("ascii"))
     for index, name in enumerate(columns):
-        arr = batch.column(index)
-        if pa.types.is_dictionary(arr.type):
-            arr = arr.cast(pa.string())
-        values = arr.to_pylist()
+        array = batch.column(index)
+        if pa.types.is_dictionary(array.type):
+            array = array.cast(pa.string())
+        values = array.to_pylist()
         h.update(name.encode("utf-8"))
         h.update(b"\0")
         h.update(repr(values).encode("utf-8"))
@@ -56,32 +52,61 @@ def _batch_hash(batch: pa.RecordBatch, columns: list[str]) -> str:
 
 
 def _batch_rows(batch: pa.RecordBatch, columns: list[str]) -> list[dict[str, Any]]:
-    """Materialize one already-identified differing batch for diagnostic output."""
     arrays = []
     for index in range(len(columns)):
-        arr = batch.column(index)
-        if pa.types.is_dictionary(arr.type):
-            arr = arr.cast(pa.string())
-        arrays.append(arr)
-    table = pa.Table.from_arrays(arrays, names=columns)
-    return table.to_pylist()
+        array = batch.column(index)
+        if pa.types.is_dictionary(array.type):
+            array = array.cast(pa.string())
+        arrays.append(array)
+    return pa.Table.from_arrays(arrays, names=columns).to_pylist()
 
 
-def _required_columns(kind: str) -> list[str]:
+def _target_columns(kind: str) -> list[str]:
     try:
         return _KIND_COLUMNS[kind]
     except KeyError as exc:
         raise ValueError(f"Unsupported diff kind: {kind}") from exc
 
 
-def _schema_check(path: Path, required: list[str]) -> dict[str, Any]:
-    parquet = pq.ParquetFile(path)
-    available = parquet.schema_arrow.names
-    missing = [column for column in required if column not in available]
-    return {
-        "schema": str(parquet.schema_arrow),
-        "missing_required_columns": missing,
+def _schema_evolution(
+    baseline: Path,
+    candidate: Path,
+    kind: str,
+) -> tuple[list[str], dict[str, Any]]:
+    target = _target_columns(kind)
+    baseline_schema = pq.ParquetFile(baseline).schema_arrow
+    candidate_schema = pq.ParquetFile(candidate).schema_arrow
+    baseline_names = list(baseline_schema.names)
+    candidate_names = list(candidate_schema.names)
+
+    candidate_missing = [name for name in target if name not in candidate_names]
+    if candidate_missing:
+        raise ValueError(
+            f"Candidate is missing canonical {kind} columns: {candidate_missing}"
+        )
+
+    common = [
+        name for name in target if name in baseline_names and name in candidate_names
+    ]
+    if not common:
+        raise ValueError("No common canonical columns available for row diagnostics")
+
+    report = {
+        "baseline_schema": str(baseline_schema),
+        "candidate_schema": str(candidate_schema),
+        "baseline_missing_target_columns": [
+            name for name in target if name not in baseline_names
+        ],
+        "candidate_missing_target_columns": candidate_missing,
+        "candidate_added_columns": [
+            name for name in candidate_names if name not in baseline_names
+        ],
+        "baseline_only_columns": [
+            name for name in baseline_names if name not in candidate_names
+        ],
+        "comparison_columns": common,
     }
+    return common, report
 
 
 def _diff_signature(
@@ -89,9 +114,8 @@ def _diff_signature(
     baseline_fp: dict[str, object],
     candidate_fp: dict[str, object],
 ) -> str:
-    """Create a stable signature that changes whenever either logical output changes."""
     payload = {
-        "version": 1,
+        "version": 2,
         "kind": kind,
         "baseline_semantic_sha256": baseline_fp["semantic_sha256"],
         "baseline_row_count": baseline_fp["row_count"],
@@ -110,7 +134,6 @@ def _row_difference(
     candidate_row: dict[str, Any] | None,
     columns: Iterable[str],
 ) -> dict[str, Any]:
-    """Describe one positional row difference without guessing semantic intent."""
     if baseline_row is None:
         return {
             "row": absolute_row,
@@ -146,7 +169,7 @@ def compare_parquet_outputs(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_row_diffs: int = 50,
 ) -> dict[str, Any]:
-    """Compare two MBO or MBP-1 outputs with bounded memory."""
+    """Compare legacy and candidate MBO/MBP1 outputs with bounded memory."""
     baseline = Path(baseline)
     candidate = Path(candidate)
     if not baseline.exists():
@@ -158,22 +181,15 @@ def compare_parquet_outputs(
     if max_row_diffs < 0:
         raise ValueError("max_row_diffs must be non-negative")
 
-    columns = _required_columns(kind)
-    baseline_schema = _schema_check(baseline, columns)
-    candidate_schema = _schema_check(candidate, columns)
-    missing = {
-        "baseline": baseline_schema["missing_required_columns"],
-        "candidate": candidate_schema["missing_required_columns"],
-    }
-    if missing["baseline"] or missing["candidate"]:
-        raise ValueError(f"Required columns missing: {missing}")
+    comparison_columns, schema_evolution = _schema_evolution(
+        baseline, candidate, kind
+    )
 
-    baseline_fp = semantic_parquet_fingerprint(
-        baseline, columns=columns, batch_size=batch_size
-    )
-    candidate_fp = semantic_parquet_fingerprint(
-        candidate, columns=columns, batch_size=batch_size
-    )
+    # Full-file fingerprints intentionally use every column available on each
+    # side. Schema additions therefore affect the diff signature even when all
+    # legacy/common field values remain identical.
+    baseline_fp = semantic_parquet_fingerprint(baseline, batch_size=batch_size)
+    candidate_fp = semantic_parquet_fingerprint(candidate, batch_size=batch_size)
     signature = _diff_signature(kind, baseline_fp, candidate_fp)
 
     identical = (
@@ -181,11 +197,13 @@ def compare_parquet_outputs(
         and baseline_fp["row_count"] == candidate_fp["row_count"]
         and baseline_fp["schema"] == candidate_fp["schema"]
     )
+
     report: dict[str, Any] = {
-        "report_version": 1,
+        "report_version": 2,
         "kind": kind,
         "baseline": baseline_fp,
         "candidate": candidate_fp,
+        "schema_evolution": schema_evolution,
         "diff_signature": signature,
         "status": "IDENTICAL" if identical else "DIFFERENT",
         "classification": "NO_CHANGE" if identical else "UNCLASSIFIED",
@@ -196,24 +214,33 @@ def compare_parquet_outputs(
     if identical:
         return report
 
-    baseline_pf = pq.ParquetFile(baseline)
-    candidate_pf = pq.ParquetFile(candidate)
-    baseline_batches = baseline_pf.iter_batches(batch_size=batch_size, columns=columns)
-    candidate_batches = candidate_pf.iter_batches(batch_size=batch_size, columns=columns)
+    baseline_batches = pq.ParquetFile(baseline).iter_batches(
+        batch_size=batch_size,
+        columns=comparison_columns,
+    )
+    candidate_batches = pq.ParquetFile(candidate).iter_batches(
+        batch_size=batch_size,
+        columns=comparison_columns,
+    )
 
     row_offset = 0
     batch_index = 0
     for baseline_batch, candidate_batch in zip_longest(
-        baseline_batches, candidate_batches, fillvalue=None
+        baseline_batches,
+        candidate_batches,
+        fillvalue=None,
     ):
-        baseline_rows_count = len(baseline_batch) if baseline_batch is not None else 0
-        candidate_rows_count = len(candidate_batch) if candidate_batch is not None else 0
-
+        baseline_count = len(baseline_batch) if baseline_batch is not None else 0
+        candidate_count = len(candidate_batch) if candidate_batch is not None else 0
         baseline_hash = (
-            _batch_hash(baseline_batch, columns) if baseline_batch is not None else None
+            _batch_hash(baseline_batch, comparison_columns)
+            if baseline_batch is not None
+            else None
         )
         candidate_hash = (
-            _batch_hash(candidate_batch, columns) if candidate_batch is not None else None
+            _batch_hash(candidate_batch, comparison_columns)
+            if candidate_batch is not None
+            else None
         )
 
         if baseline_hash != candidate_hash:
@@ -221,8 +248,8 @@ def compare_parquet_outputs(
                 {
                     "batch_index": batch_index,
                     "row_offset": row_offset,
-                    "baseline_rows": baseline_rows_count,
-                    "candidate_rows": candidate_rows_count,
+                    "baseline_rows": baseline_count,
+                    "candidate_rows": candidate_count,
                     "baseline_hash": baseline_hash,
                     "candidate_hash": candidate_hash,
                 }
@@ -230,10 +257,14 @@ def compare_parquet_outputs(
 
             if len(report["row_differences"]) < max_row_diffs:
                 baseline_rows = (
-                    _batch_rows(baseline_batch, columns) if baseline_batch is not None else []
+                    _batch_rows(baseline_batch, comparison_columns)
+                    if baseline_batch is not None
+                    else []
                 )
                 candidate_rows = (
-                    _batch_rows(candidate_batch, columns) if candidate_batch is not None else []
+                    _batch_rows(candidate_batch, comparison_columns)
+                    if candidate_batch is not None
+                    else []
                 )
                 for local_index, pair in enumerate(
                     zip_longest(baseline_rows, candidate_rows, fillvalue=None)
@@ -249,11 +280,11 @@ def compare_parquet_outputs(
                             row_offset + local_index,
                             baseline_row,
                             candidate_row,
-                            columns,
+                            comparison_columns,
                         )
                     )
 
-        row_offset += max(baseline_rows_count, candidate_rows_count)
+        row_offset += max(baseline_count, candidate_count)
         batch_index += 1
 
     if len(report["row_differences"]) >= max_row_diffs and report["differing_batches"]:
@@ -263,9 +294,9 @@ def compare_parquet_outputs(
 
 
 def apply_classification(
-    report: dict[str, Any], classification: dict[str, Any]
+    report: dict[str, Any],
+    classification: dict[str, Any],
 ) -> dict[str, Any]:
-    """Bind a human classification to exactly one deterministic diff signature."""
     if report["status"] == "IDENTICAL":
         if classification:
             raise ValueError("Cannot classify an IDENTICAL report")
@@ -283,7 +314,6 @@ def apply_classification(
         raise ValueError(
             f"classification must be one of {sorted(_VALID_CLASSIFICATIONS)}, got {label}"
         )
-
     if label == "EXPECTED_CHANGE" and not classification.get("decision_ref"):
         raise ValueError("EXPECTED_CHANGE requires a non-empty decision_ref")
 
@@ -298,9 +328,9 @@ def apply_classification(
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    tmp.replace(path)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temp.replace(path)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -312,13 +342,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--kind", required=True, choices=sorted(_KIND_COLUMNS))
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max-row-diffs", type=int, default=50)
-    parser.add_argument("--classification", type=Path, default=None)
+    parser.add_argument("--classification", type=Path)
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument(
-        "--allow-unclassified",
-        action="store_true",
-        help="Return success for exploratory UNCLASSIFIED diffs. Never use in merge gates.",
-    )
+    parser.add_argument("--allow-unclassified", action="store_true")
     return parser.parse_args()
 
 
@@ -331,11 +357,11 @@ def main() -> int:
         batch_size=args.batch_size,
         max_row_diffs=args.max_row_diffs,
     )
-
     if args.classification is not None:
-        classification = json.loads(args.classification.read_text())
-        report = apply_classification(report, classification)
-
+        report = apply_classification(
+            report,
+            json.loads(args.classification.read_text()),
+        )
     _write_json_atomic(args.report, report)
 
     print(f"Differential report: {args.report}")
@@ -344,6 +370,10 @@ def main() -> int:
     print(f"Diff signature: {report['diff_signature']}")
     print(f"Differing batches: {len(report['differing_batches'])}")
     print(f"Sampled row diffs: {len(report['row_differences'])}")
+    print(
+        "Schema additions: "
+        f"{report['schema_evolution']['candidate_added_columns']}"
+    )
 
     if report["classification"] in {"NO_CHANGE", "EXPECTED_CHANGE"}:
         return 0

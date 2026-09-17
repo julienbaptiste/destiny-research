@@ -4,6 +4,11 @@ The fast golden suite remains intentionally lightweight, while the R0 safety
 net adds a separate full-file semantic fingerprint. This module is responsible
 for exact day selection, bounded-memory metric extraction and deterministic
 legacy golden comparisons.
+
+Candidate note: CHECKSUM_COLS includes the canonical R0.1 ordering/provenance
+fields. Historical pre-R0 checksum goldens are therefore legacy evidence, not a
+candidate merge gate; corrected goldens are generated only after differential
+classification.
 """
 
 from __future__ import annotations
@@ -36,6 +41,9 @@ CHECKSUM_COLS = [
     "size",
     "order_id",
     "flags",
+    "norm_flags",
+    "sequence",
+    "subsequence",
 ]
 
 # warmup_skip_count is deliberately not asserted here. The current pipeline
@@ -238,16 +246,7 @@ def extract_metrics(
     sample_parts: list[pa.RecordBatch] = []
     sample_rows = 0
 
-    columns = [
-        "ts_event",
-        "ts_recv",
-        "action",
-        "side",
-        "price",
-        "size",
-        "order_id",
-        "flags",
-    ]
+    columns = [name for name in CHECKSUM_COLS if name in parquet.schema_arrow.names]
 
     for batch in parquet.iter_batches(batch_size=READ_BATCH_ROWS, columns=columns):
         action_arr = batch.column(batch.schema.get_field_index("action"))

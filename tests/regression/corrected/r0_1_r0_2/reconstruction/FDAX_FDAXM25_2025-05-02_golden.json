@@ -1,0 +1,62 @@
+{
+  "checksum_columns": [
+    "ts_event",
+    "ts_recv",
+    "action",
+    "side",
+    "price",
+    "flags",
+    "sequence",
+    "subsequence",
+    "bid_px_00",
+    "ask_px_00",
+    "bid_sz_00",
+    "ask_sz_00",
+    "bid_ct_00",
+    "ask_ct_00"
+  ],
+  "classification": "EXPECTED_CHANGE",
+  "contract": "FDAXM25",
+  "date": "2025-05-02",
+  "decision_ref": "ADR-003",
+  "diff_signature": "26a82e3b5bd9ccacf0f780e06cf424bf8e1eb5e6d103f9e30fadc63bfb0e70f2",
+  "evidence_candidate_commit": "c731de7f41769a7234778e911a101a4afa4b07c5",
+  "format_version": 1,
+  "full_fingerprint": {
+    "batch_size": 100000,
+    "columns": [
+      "ts_event",
+      "ts_recv",
+      "action",
+      "side",
+      "price",
+      "flags",
+      "sequence",
+      "subsequence",
+      "bid_px_00",
+      "ask_px_00",
+      "bid_sz_00",
+      "ask_sz_00",
+      "bid_ct_00",
+      "ask_ct_00"
+    ],
+    "file_sha256": "16639b19e2ee6fb89378b2c2525e57944fa9f68930bbea4a84919e8ffc5d81a4",
+    "file_size_bytes": 48053602,
+    "row_count": 2968920,
+    "rows_hashed": 2968920,
+    "schema": "ts_event: uint64 not null\nts_recv: uint64 not null\naction: string not null\nside: string not null\nprice: double not null\nflags: uint8 not null\nsequence: uint32 not null\nsubsequence: uint16 not null\nbid_px_00: double\nask_px_00: double\nbid_sz_00: uint32\nask_sz_00: uint32\nbid_ct_00: uint32\nask_ct_00: uint32",
+    "semantic_sha256": "10c5ca90b69cd2098767dc18efe119f478aa13540ddb79ef099ff032969007f8"
+  },
+  "golden_namespace": "corrected/r0_1_r0_2",
+  "kind": "mbp1",
+  "product": "FDAX",
+  "reconstruction_stats": {
+    "elapsed_seconds": 38.37,
+    "n_events": 3088151,
+    "n_orphan_cancel": 0,
+    "n_orphan_modify": 0,
+    "n_rows_emitted": 2968920
+  },
+  "sample_checksum_sha256": "ae3057cbc7e386cf240cd746153fd4b8cd17a7e934783d07ee118342b0942f4a",
+  "sample_rows_used": 50000
+}
