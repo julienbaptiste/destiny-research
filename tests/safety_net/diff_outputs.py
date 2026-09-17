@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Iterable
@@ -19,9 +20,16 @@ from typing import Any, Iterable
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ingestion.schema import NORMALIZED_MBO_SCHEMA
-from reconstruction.build_mbp1 import MBP1_SCHEMA
-from shared.fingerprint import DEFAULT_BATCH_SIZE, semantic_parquet_fingerprint
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "tests" / "regression"))
+
+from ingestion.schema import NORMALIZED_MBO_SCHEMA  # noqa: E402
+from reconstruction.build_mbp1 import MBP1_SCHEMA  # noqa: E402
+from shared.fingerprint import (  # noqa: E402
+    DEFAULT_BATCH_SIZE,
+    semantic_parquet_fingerprint,
+)
 
 
 _KIND_COLUMNS = {
