@@ -25,7 +25,7 @@ from ingestion.adapters.base import ContractInfo, SessionConfig
 from ingestion.adapters.databento_adapter import DatabentoAdapter
 from ingestion.adapters.hkex_adapter import HKEXAdapter
 from ingestion.schema import NORMALIZED_MBO_SCHEMA, ValidationMode
-from ingestion.validator import ValidatorState, validate_batch
+from ingestion.validator import ValidatorState, _build_rejected_row, validate_event
 from reconstruction.build_mbp1 import Market, _apply_book, reconstruct_day
 
 
@@ -202,7 +202,7 @@ def _validate_events(
     case: dict[str, Any],
     adapter_events: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], ValidatorState]:
-    """Validate events in feed order while supporting explicit warmup boundaries."""
+    """Validate events exactly like production ingestion, preserving feed order."""
     session = case["session"]
     mode = session.get("validation_mode", ValidationMode.STRICT)
     state = ValidatorState(
@@ -216,9 +216,19 @@ def _validate_events(
     for index, event in enumerate(adapter_events):
         if warmup_end_before is not None and index == int(warmup_end_before):
             state.warmup_end()
-        clean, rejected = validate_batch([event], state, mode=mode)
-        clean_rows.extend(clean.to_pylist())
-        rejected_rows.extend(rejected.to_pylist())
+
+        # Mirror ingest_file(): validate one event at a time, persist the rejected
+        # audit row explicitly, and retain flagged anomalies only in LOOSE mode.
+        is_clean, reason = validate_event(event, state)
+        if is_clean:
+            clean_rows.append(event)
+            continue
+
+        rejected_rows.append(_build_rejected_row(event, reason, mode))
+        if mode == ValidationMode.LOOSE:
+            flagged = dict(event)
+            flagged["flags"] = event.get("flags", 0) | 0x04
+            clean_rows.append(flagged)
 
     return clean_rows, rejected_rows, state
 
