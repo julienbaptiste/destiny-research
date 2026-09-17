@@ -1,0 +1,298 @@
+[
+  {
+    "fixture_version": 1,
+    "id": "DB-01",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "Single ADD creates one resting bid and one final MBP-1 snapshot.",
+    "session": {
+      "date": "2025-10-01",
+      "venue": "CME",
+      "product": "ES",
+      "contract": "ESZ25",
+      "instrument_id": 1001,
+      "publisher_id": 1,
+      "validation_mode": "STRICT",
+      "validator_warmup_mode": false
+    },
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 1, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [
+        {"instrument_id": 1001, "publisher_id": 1, "order_id": 101, "side": "BID", "price": 4500250000000, "size": 5}
+      ],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 1, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 1, "n_rows_emitted": 1, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-02",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "Partial CANCEL uses delta-cancel semantics and leaves residual quantity.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+      {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "C", "side": "B", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 128, "sequence": 2}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "CANCEL", "side": "BID", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 128, "sequence": 2}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [
+        {"instrument_id": 1001, "publisher_id": 1, "order_id": 101, "side": "BID", "price": 4500250000000, "size": 3}
+      ],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 1, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "CANCEL", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 2, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 3, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-03",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "Full CANCEL removes the resting order and empties the bid side.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+      {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "C", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 2}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "CANCEL", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 2}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 1, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "CANCEL", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 2, "bid_px_00": null, "ask_px_00": null, "bid_sz_00": null, "ask_sz_00": null, "bid_ct_00": null, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-04",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "MODIFY size decrease updates quantity in place.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+      {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "M", "side": "B", "price": 4500250000000, "size": 3, "order_id": 101, "flags": 128, "sequence": 2}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "MODIFY", "side": "BID", "price": 4500250000000, "size": 3, "order_id": 101, "flags": 128, "sequence": 2}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [{"instrument_id": 1001, "publisher_id": 1, "order_id": 101, "side": "BID", "price": 4500250000000, "size": 3}],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 1, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "MODIFY", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 2, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 3, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-05",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "MODIFY size increase updates quantity and represents priority loss policy in reconstruction.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+      {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "M", "side": "B", "price": 4500250000000, "size": 7, "order_id": 101, "flags": 128, "sequence": 2}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "MODIFY", "side": "BID", "price": 4500250000000, "size": 7, "order_id": 101, "flags": 128, "sequence": 2}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [{"instrument_id": 1001, "publisher_id": 1, "order_id": 101, "side": "BID", "price": 4500250000000, "size": 7}],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 1, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "MODIFY", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 2, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 7, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-06",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "MODIFY price moves the order to the new price level.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+      {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "M", "side": "B", "price": 4500500000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 2}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "MODIFY", "side": "BID", "price": 4500500000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 2}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [{"instrument_id": 1001, "publisher_id": 1, "order_id": 101, "side": "BID", "price": 4500500000000, "size": 5}],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 1, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "MODIFY", "side": "BID", "price": 4500.5, "flags": 128, "sequence": 2, "bid_px_00": 4500.5, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-08",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "CLEAR hard-resets the book.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+      {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "R", "side": "N", "price": 0, "size": 0, "order_id": 0, "flags": 128, "sequence": 2}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "CLEAR", "side": "NONE", "price": 0, "size": 0, "order_id": 0, "flags": 128, "sequence": 2}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "ADD", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 1, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null},
+        {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "CLEAR", "side": "NONE", "price": 0.0, "flags": 128, "sequence": 2, "bid_px_00": null, "ask_px_00": null, "bid_sz_00": null, "ask_sz_00": null, "bid_ct_00": null, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-13",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "Calendar spreads accept zero and negative fixed-point prices.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ES_CAL_Z25H26", "instrument_id": 2001, "publisher_id": 1, "is_spread": true, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000011, "ts_recv": 1759276800000000111, "action": "A", "side": "B", "price": 0, "size": 2, "order_id": 201, "flags": 128, "sequence": 11},
+      {"ts_event": 1759276800000000012, "ts_recv": 1759276800000000112, "action": "A", "side": "B", "price": -250000000, "size": 3, "order_id": 202, "flags": 128, "sequence": 12}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000011, "ts_recv": 1759276800000000111, "action": "ADD", "side": "BID", "price": 0, "size": 2, "order_id": 201, "flags": 128, "sequence": 11},
+        {"ts_event": 1759276800000000012, "ts_recv": 1759276800000000112, "action": "ADD", "side": "BID", "price": -250000000, "size": 3, "order_id": 202, "flags": 128, "sequence": 12}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [
+        {"instrument_id": 2001, "publisher_id": 1, "order_id": 202, "side": "BID", "price": -250000000, "size": 3},
+        {"instrument_id": 2001, "publisher_id": 1, "order_id": 201, "side": "BID", "price": 0, "size": 2}
+      ],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000011, "ts_recv": 1759276800000000111, "action": "ADD", "side": "BID", "price": 0.0, "flags": 128, "sequence": 11, "bid_px_00": 0.0, "ask_px_00": null, "bid_sz_00": 2, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null},
+        {"ts_event": 1759276800000000012, "ts_recv": 1759276800000000112, "action": "ADD", "side": "BID", "price": -0.25, "flags": 128, "sequence": 12, "bid_px_00": 0.0, "ask_px_00": null, "bid_sz_00": 2, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-14",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "A bit-for-bit duplicate event is rejected deterministically in STRICT mode.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000021, "ts_recv": 1759276800000000121, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 301, "flags": 128, "sequence": 21},
+      {"ts_event": 1759276800000000021, "ts_recv": 1759276800000000121, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 301, "flags": 128, "sequence": 21}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000021, "ts_recv": 1759276800000000121, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 301, "flags": 128, "sequence": 21},
+        {"ts_event": 1759276800000000021, "ts_recv": 1759276800000000121, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 301, "flags": 128, "sequence": 21}
+      ],
+      "clean_events": [
+        {"ts_event": 1759276800000000021, "ts_recv": 1759276800000000121, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 301, "flags": 128, "sequence": 21}
+      ],
+      "rejected_reasons": ["DUPLICATE_EVENT"],
+      "validator_stats": {"n_validated": 2, "n_rejected": 1, "n_warmup_skip": 0},
+      "final_orders": [{"instrument_id": 1001, "publisher_id": 1, "order_id": 301, "side": "BID", "price": 4500250000000, "size": 5}],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000021, "ts_recv": 1759276800000000121, "action": "ADD", "side": "BID", "price": 4500.25, "flags": 128, "sequence": 21, "bid_px_00": 4500.25, "ask_px_00": null, "bid_sz_00": 5, "ask_sz_00": null, "bid_ct_00": 1, "ask_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 1, "n_rows_emitted": 1, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-15",
+    "status": "NORMATIVE",
+    "baseline_compatible": true,
+    "provider": "databento",
+    "description": "Two messages sharing one sequence emit only one MBP-1 snapshot at the F_LAST boundary.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000031, "ts_recv": 1759276800000000131, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 401, "flags": 0, "sequence": 100},
+      {"ts_event": 1759276800000000032, "ts_recv": 1759276800000000132, "action": "A", "side": "A", "price": 4500500000000, "size": 4, "order_id": 402, "flags": 128, "sequence": 100}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"ts_event": 1759276800000000031, "ts_recv": 1759276800000000131, "action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 401, "flags": 0, "sequence": 100},
+        {"ts_event": 1759276800000000032, "ts_recv": 1759276800000000132, "action": "ADD", "side": "ASK", "price": 4500500000000, "size": 4, "order_id": 402, "flags": 128, "sequence": 100}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [
+        {"instrument_id": 1001, "publisher_id": 1, "order_id": 402, "side": "ASK", "price": 4500500000000, "size": 4},
+        {"instrument_id": 1001, "publisher_id": 1, "order_id": 401, "side": "BID", "price": 4500250000000, "size": 5}
+      ],
+      "mbp1_rows": [
+        {"ts_event": 1759276800000000032, "ts_recv": 1759276800000000132, "action": "ADD", "side": "ASK", "price": 4500.5, "flags": 128, "sequence": 100, "bid_px_00": 4500.25, "ask_px_00": 4500.5, "bid_sz_00": 5, "ask_sz_00": 4, "bid_ct_00": 1, "ask_ct_00": 1}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 1, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  }
+]
