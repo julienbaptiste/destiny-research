@@ -15,9 +15,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 import logging
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import time
 from typing import Iterator
 
@@ -363,7 +365,7 @@ def reconstruct_day(
     product: str,
     contract: str,
 ) -> dict:
-    """Reconstruct one normalized day in bounded memory."""
+    """Reconstruct one normalized day in bounded memory with atomic publication."""
     read_batch_size = 100_000
     write_flush_rows = 50_000
     started = time.perf_counter()
@@ -376,7 +378,8 @@ def reconstruct_day(
     group_has_trade = False
 
     out_file.parent.mkdir(parents=True, exist_ok=True)
-    writer = pq.ParquetWriter(out_file, MBP1_SCHEMA, compression="zstd")
+    temp_file: Path | None = None
+    writer: pq.ParquetWriter | None = None
 
     def col(batch: pa.RecordBatch, name: str) -> list:
         array = batch.column(name)
@@ -392,6 +395,17 @@ def reconstruct_day(
         output_rows.clear()
 
     try:
+        # Stage beside the canonical target so os.replace() stays on one
+        # filesystem and therefore publishes the completed Parquet atomically.
+        with tempfile.NamedTemporaryFile(
+            dir=out_file.parent,
+            prefix=f".{out_file.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temp_file = Path(temporary.name)
+
+        writer = pq.ParquetWriter(temp_file, MBP1_SCHEMA, compression="zstd")
         parquet = pq.ParquetFile(mbo_file)
         for batch in parquet.iter_batches(batch_size=read_batch_size):
             batch_len = len(batch)
@@ -472,27 +486,46 @@ def reconstruct_day(
                 group_has_trade = False
 
         flush()
-    finally:
         writer.close()
+        writer = None
 
-    n_orphan_cancel = sum(
-        book._n_orphan_cancel
-        for books_by_publisher in market._books.values()
-        for book in books_by_publisher.values()
-    )
-    n_orphan_modify = sum(
-        book._n_orphan_modify
-        for books_by_publisher in market._books.values()
-        for book in books_by_publisher.values()
-    )
+        n_orphan_cancel = sum(
+            book._n_orphan_cancel
+            for books_by_publisher in market._books.values()
+            for book in books_by_publisher.values()
+        )
+        n_orphan_modify = sum(
+            book._n_orphan_modify
+            for books_by_publisher in market._books.values()
+            for book in books_by_publisher.values()
+        )
 
-    return {
-        "n_events": n_events,
-        "n_rows_emitted": n_rows_emitted,
-        "n_orphan_cancel": n_orphan_cancel,
-        "n_orphan_modify": n_orphan_modify,
-        "elapsed_seconds": round(time.perf_counter() - started, 2),
-    }
+        stats = {
+            "n_events": n_events,
+            "n_rows_emitted": n_rows_emitted,
+            "n_orphan_cancel": n_orphan_cancel,
+            "n_orphan_modify": n_orphan_modify,
+            "elapsed_seconds": round(time.perf_counter() - started, 2),
+        }
+
+        # The canonical path changes only after all reconstruction and writer
+        # finalization work has completed successfully.
+        os.replace(temp_file, out_file)
+        temp_file = None
+        return stats
+    except BaseException:
+        # Cleanup must never mask the original reconstruction failure.
+        if writer is not None:
+            try:
+                writer.close()
+            except BaseException:
+                log.debug("Ignoring Parquet writer close failure during cleanup", exc_info=True)
+        if temp_file is not None:
+            try:
+                temp_file.unlink(missing_ok=True)
+            except OSError:
+                log.warning("Failed to remove staged MBP-1 output %s", temp_file, exc_info=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
