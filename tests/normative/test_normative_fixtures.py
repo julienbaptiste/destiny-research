@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
-from tests.safety_net.fixture_framework import (
+_SAFETY_NET_DIR = Path(__file__).resolve().parents[1] / "safety_net"
+sys.path.insert(0, str(_SAFETY_NET_DIR))
+
+from fixture_framework import (  # noqa: E402
     execute_fixture,
     expected_fixture_result,
     load_fixture_cases,
