@@ -43,6 +43,7 @@ CHECKSUM_COLS = [
     "price",
     "flags",
     "sequence",
+    "subsequence",
     "bid_px_00",
     "ask_px_00",
     "bid_sz_00",
