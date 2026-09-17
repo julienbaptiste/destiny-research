@@ -125,6 +125,30 @@ To classify an approved change, create a small JSON file bound to the exact sign
 
 Then rerun with `--classification /path/to/classification.json`. A stale classification for another diff is rejected. `EXPECTED_CHANGE` requires a decision reference; `UNEXPECTED_REGRESSION` returns a blocking exit code.
 
+## Reviewed R0.1/R0.2 classification replay
+
+The six-canary R0.1/R0.2 qualification generated twelve reviewed MBO/MBP1 signatures from candidate commit `c731de7f41769a7234778e911a101a4afa4b07c5`. Their exact human-reviewed classifications are committed in:
+
+`tests/safety_net/classifications/r0_1_r0_2.json`
+
+Do not rerun the expensive ingestion/reconstruction canaries merely to apply these classifications. Reuse the existing `/tmp/destiny_r0_candidate_canary` evidence:
+
+```bash
+python tests/safety_net/run_candidate_preflight.py
+python tests/safety_net/classify_candidate_evidence.py
+```
+
+`classify_candidate_evidence.py` is intentionally strict:
+
+- the existing qualification summary must reference the exact reviewed candidate commit;
+- all six canaries must be present;
+- every classification must bind the exact current `diff_signature`;
+- stale signatures are rejected by `apply_classification()`;
+- classified reports are written beside the original unclassified reports rather than overwriting them;
+- success requires every reviewed changed output to resolve to `EXPECTED_CHANGE` (or `NO_CHANGE` if a future identical report is deliberately left unclassified).
+
+The replay writes `/tmp/destiny_r0_candidate_canary/candidate_qualification_classified_summary.json`. Corrected goldens may be frozen only after this replay passes locally.
+
 ## Historical deep runner
 
 The historical `python tests/run_all_checks.py` deep mode still writes through the production pipeline. For R0 work, use it only deliberately; `--skip-pipeline` remains the safe fast-golden mode.
