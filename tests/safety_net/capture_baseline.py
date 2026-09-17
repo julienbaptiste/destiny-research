@@ -56,7 +56,7 @@ def _git_head() -> str | None:
 
 
 def _capture(path: Path) -> dict[str, object]:
-    """Fingerprint one Parquet output or record it as missing."""
+    """Fingerprint one Parquet output or record its absence."""
     if not path.exists():
         return {
             "exists": False,
@@ -131,21 +131,34 @@ def main() -> int:
     tmp_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     tmp_path.replace(args.output)
 
-    missing = 0
     checked = 0
-    for section in ("normalization", "reconstruction"):
-        for payload in manifest[section].values():
-            for key, value in payload.items():
-                if key in {"contract", "date"}:
-                    continue
-                checked += 1
-                if not value["exists"]:
-                    missing += 1
+    required_missing = 0
+    optional_absent = 0
+
+    for payload in manifest["normalization"].values():
+        for key in ("mbo", "rejected"):
+            checked += 1
+            if payload[key]["exists"]:
+                continue
+            if key == "mbo":
+                required_missing += 1
+            else:
+                # No rejected parquet is the normal representation of a day
+                # with zero rejected events, so absence is part of the baseline.
+                optional_absent += 1
+
+    for payload in manifest["reconstruction"].values():
+        checked += 1
+        if not payload["mbp1"]["exists"]:
+            required_missing += 1
 
     print(f"Baseline manifest written: {args.output}")
-    print(f"Files checked: {checked} | missing: {missing}")
+    print(
+        f"Files checked: {checked} | required missing: {required_missing} "
+        f"| optional rejected absent: {optional_absent}"
+    )
     print(f"Baseline code SHA: {BASELINE_COMMIT}")
-    return 0 if missing == 0 else 2
+    return 0 if required_missing == 0 else 2
 
 
 if __name__ == "__main__":
