@@ -1,9 +1,9 @@
 """Run the code-only R0 safety-net preflight.
 
 This command does not rerun paid-data pipelines. It validates the runtime,
-fingerprint detector, canary provenance helpers, normative synthetic fixtures,
-legacy HKEX characterization and existing fast regression goldens against
-outputs already present on disk.
+fingerprint detector, canary provenance helpers, differential runner, normative
+synthetic fixtures, legacy HKEX characterization and existing fast regression
+goldens against outputs already present on disk.
 """
 
 from __future__ import annotations
@@ -69,6 +69,7 @@ def main() -> int:
                 "pytest",
                 "tests/safety_net/test_fingerprint.py",
                 "tests/safety_net/test_canary_helpers.py",
+                "tests/safety_net/test_diff_outputs.py",
                 "tests/normative/test_normative_fixtures.py",
                 "-v",
             ],
