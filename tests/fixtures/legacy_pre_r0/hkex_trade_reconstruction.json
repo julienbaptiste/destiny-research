@@ -1,0 +1,57 @@
+{
+  "fixture_version": 1,
+  "id": "LEGACY-HKEX-RECON-01",
+  "status": "LEGACY_CHARACTERIZATION",
+  "description": "Freeze the pre-R0 double-F_LAST HKEX trade bundle and the resulting intermediate pre-decrement MBP-1 snapshot. This is deliberately not normative behavior.",
+  "contract": {
+    "product": "HSI",
+    "contract": "HSIG26",
+    "orderbook_id": 135335842,
+    "tick_size_fp": 1000000000,
+    "currency": "HKD"
+  },
+  "raw_events": [
+    {
+      "source": "order",
+      "msg_type": 330,
+      "orderbook_id": 135335842,
+      "symbol": "HSIG6",
+      "class_code": "HSI",
+      "order_id": 8108676166385258219,
+      "price": 27079,
+      "quantity": 5,
+      "side": 0,
+      "send_time_ns": 1769995480741000000,
+      "seq_num": 4101677,
+      "msg_index": 0
+    },
+    {
+      "source": "trade",
+      "msg_type": 350,
+      "orderbook_id": 135335842,
+      "symbol": "HSIG6",
+      "class_code": "HSI",
+      "order_id": 8108676166385258219,
+      "price": 27079,
+      "quantity": 2,
+      "side": 2,
+      "send_time_ns": 1769995480751000000,
+      "seq_num": 4101687,
+      "msg_index": 0,
+      "trade_time_ns": 0,
+      "trade_id": 999,
+      "deal_type": 0,
+      "combo_group_id": 0
+    }
+  ],
+  "expected_pre_r0": {
+    "normalized_actions": ["ADD", "TRADE", "FILL", "CANCEL"],
+    "normalized_flags": [132, 132, 0, 132],
+    "mbp1_actions": ["ADD", "TRADE", "CANCEL"],
+    "mbp1_bid_sizes": [5, 5, 3],
+    "mbp1_bid_prices": [27079.0, 27079.0, 27079.0],
+    "n_rows_emitted": 3,
+    "n_orphan_cancel": 0,
+    "n_orphan_modify": 0
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "baseline_name": "pre-r0",
+  "baseline_commit": "69ef65ca3c17df63a72e8fef371140b5b7bc0db0",
+  "captured_on": "2026-09-16",
+  "purpose": "Immutable code reference before R0 correctness work. Data-output fingerprints are captured locally with capture_baseline.py because vendor datasets are not committed.",
+  "policy": {
+    "legacy_behavior_is_not_normative": true,
+    "golden_updates_require_review": true,
+    "vendor_data_must_not_be_committed": true,
+    "unexpected_diffs_block_merge": true
+  }
+}
