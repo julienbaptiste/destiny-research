@@ -83,6 +83,7 @@ def main() -> int:
                 "tests/test_hkex_synthetic_cancel.py",
                 "tests/characterization/test_hkex_pre_r0.py",
                 "tests/characterization/test_hkex_legacy_fixture.py",
+                "tests/characterization/test_hkex_reconstruction_pre_r0.py",
                 "-v",
             ],
         ),
