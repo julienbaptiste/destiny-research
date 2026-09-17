@@ -47,6 +47,18 @@ def _run(command: list[str]) -> int:
     return subprocess.run(command, cwd=_REPO_ROOT).returncode
 
 
+def _git_head() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_REPO_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def _candidate_paths(work_root: Path, product: str) -> tuple[Path, Path]:
     contract, date_str = NORMALIZATION_CASES[product]
     session_date = date.fromisoformat(date_str)
@@ -155,6 +167,7 @@ def main() -> int:
             return code
 
     summary: dict[str, object] = {
+        "candidate_commit": _git_head(),
         "products": products,
         "work_root": str(args.work_root),
         "canaries": {},
