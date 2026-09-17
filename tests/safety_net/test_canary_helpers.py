@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from rerun_canary import (
+_THIS_DIR = Path(__file__).resolve().parent
+_REGRESSION_DIR = _THIS_DIR.parent / "regression"
+sys.path.insert(0, str(_THIS_DIR))
+sys.path.insert(0, str(_REGRESSION_DIR))
+
+from rerun_canary import (  # noqa: E402
     _compare_fingerprint,
     _compare_optional_parquet,
     _raw_input_manifest,
 )
-from shared.fingerprint import semantic_parquet_fingerprint
+from shared.fingerprint import semantic_parquet_fingerprint  # noqa: E402
 
 
 def _write_parquet(path: Path, values: list[int]) -> None:
