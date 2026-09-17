@@ -84,6 +84,7 @@ def main() -> int:
                 "tests/safety_net/test_candidate_classifications.py",
                 "tests/safety_net/test_corrected_golden_contract.py",
                 "tests/safety_net/test_ingest_atomicity.py",
+                "tests/safety_net/test_mbp1_atomicity.py",
                 "-v",
             ],
         ),
