@@ -1,0 +1,139 @@
+[
+  {
+    "fixture_version": 1,
+    "id": "DB-07",
+    "status": "NORMATIVE",
+    "baseline_compatible": false,
+    "decision_ref": "ADR-003",
+    "provider": "databento",
+    "description": "One execution group carries TRADE aggressor, FILL passive, and one state-changing CANCEL with a single final boundary.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "sequence": 1},
+      {"ts_event": 1759276800000000007, "ts_recv": 1759276800000000107, "action": "T", "side": "A", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 0, "sequence": 7},
+      {"ts_event": 1759276800000000007, "ts_recv": 1759276800000000107, "action": "F", "side": "B", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 0, "sequence": 7},
+      {"ts_event": 1759276800000000007, "ts_recv": 1759276800000000107, "action": "C", "side": "B", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 128, "sequence": 7}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 128, "norm_flags": 0, "sequence": 1, "subsequence": 0},
+        {"action": "TRADE", "side": "ASK", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 0, "norm_flags": 0, "sequence": 7, "subsequence": 0},
+        {"action": "FILL", "side": "BID", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 0, "norm_flags": 0, "sequence": 7, "subsequence": 1},
+        {"action": "CANCEL", "side": "BID", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 128, "norm_flags": 0, "sequence": 7, "subsequence": 2}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 4, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [{"order_id": 101, "side": "BID", "price": 4500250000000, "size": 3}],
+      "mbp1_rows": [
+        {"sequence": 1, "action": "ADD", "bid_px_00": 4500.25, "bid_sz_00": 5},
+        {"sequence": 7, "action": "CANCEL", "bid_px_00": 4500.25, "bid_sz_00": 3}
+      ],
+      "reconstruction_stats": {"n_events": 4, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-09",
+    "status": "NORMATIVE",
+    "baseline_compatible": false,
+    "decision_ref": "ADR-003",
+    "provider": "databento",
+    "description": "F_TOB uses the canonical 0x40 bit and replaces the complete quoted side without inventing an order identity.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 0, "flags": 192, "sequence": 1}
+    ],
+    "expected": {
+      "adapter_events": [{"action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 0, "flags": 192, "norm_flags": 0, "sequence": 1, "subsequence": 0}],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 1, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [],
+      "mbp1_rows": [{"sequence": 1, "action": "ADD", "bid_px_00": 4500.25, "bid_sz_00": 5, "bid_ct_00": 0}],
+      "reconstruction_stats": {"n_events": 1, "n_rows_emitted": 1, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-10",
+    "status": "NORMATIVE",
+    "baseline_compatible": false,
+    "decision_ref": "ADR-003",
+    "provider": "databento",
+    "description": "F_TOB ADD with UNDEF_PRICE and size zero clears one quoted side under the canonical 0x40 flag.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 0, "flags": 192, "sequence": 1},
+      {"ts_event": 1759276800000000002, "ts_recv": 1759276800000000102, "action": "A", "side": "B", "price": 9223372036854775807, "size": 0, "order_id": 0, "flags": 192, "sequence": 2}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 0, "flags": 192, "norm_flags": 0, "sequence": 1, "subsequence": 0},
+        {"action": "ADD", "side": "BID", "price": 9223372036854775807, "size": 0, "order_id": 0, "flags": 192, "norm_flags": 0, "sequence": 2, "subsequence": 0}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 2, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [],
+      "mbp1_rows": [
+        {"sequence": 1, "action": "ADD", "bid_px_00": 4500.25, "bid_sz_00": 5, "bid_ct_00": 0},
+        {"sequence": 2, "action": "ADD", "bid_px_00": null, "bid_sz_00": null, "bid_ct_00": null}
+      ],
+      "reconstruction_stats": {"n_events": 2, "n_rows_emitted": 2, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-11",
+    "status": "NORMATIVE",
+    "baseline_compatible": false,
+    "decision_ref": "ADR-003",
+    "provider": "databento",
+    "description": "F_SNAPSHOT records seed the book without live MBP-1 emission; F_BAD_TS_RECV remains the provider 0x08 bit.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": true, "warmup_end_before_event": 2},
+    "source_events": [
+      {"ts_event": 1759276799000000000, "ts_recv": 1759276800000000000, "action": "R", "side": "N", "price": 9223372036854775807, "size": 0, "order_id": 0, "flags": 40, "sequence": 0},
+      {"ts_event": 1759276799000000001, "ts_recv": 1759276800000000000, "action": "A", "side": "B", "price": 4500000000000, "size": 5, "order_id": 100, "flags": 168, "sequence": 10},
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "A", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 128, "sequence": 11}
+    ],
+    "expected": {
+      "adapter_events": [
+        {"action": "CLEAR", "side": "NONE", "flags": 40, "norm_flags": 0, "sequence": 0, "subsequence": 0},
+        {"action": "ADD", "side": "BID", "price": 4500000000000, "size": 5, "order_id": 100, "flags": 168, "norm_flags": 0, "sequence": 10, "subsequence": 0},
+        {"action": "ADD", "side": "ASK", "price": 4500250000000, "size": 2, "order_id": 101, "flags": 128, "norm_flags": 0, "sequence": 11, "subsequence": 0}
+      ],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 3, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [
+        {"order_id": 100, "side": "BID", "price": 4500000000000, "size": 5},
+        {"order_id": 101, "side": "ASK", "price": 4500250000000, "size": 2}
+      ],
+      "mbp1_rows": [{"sequence": 11, "action": "ADD", "bid_px_00": 4500.0, "bid_sz_00": 5, "ask_px_00": 4500.25, "ask_sz_00": 2}],
+      "reconstruction_stats": {"n_events": 3, "n_rows_emitted": 1, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  },
+  {
+    "fixture_version": 1,
+    "id": "DB-12",
+    "status": "NORMATIVE",
+    "baseline_compatible": false,
+    "decision_ref": "ADR-003",
+    "provider": "databento",
+    "description": "Provider control flags are preserved bit-for-bit; F_BAD_TS_RECV stays 0x08 and is not remapped into a generic anomaly bit.",
+    "session": {"date": "2025-10-01", "venue": "CME", "product": "ES", "contract": "ESZ25", "instrument_id": 1001, "publisher_id": 1, "validation_mode": "STRICT", "validator_warmup_mode": false},
+    "source_events": [
+      {"ts_event": 1759276800000000001, "ts_recv": 1759276800000000101, "action": "A", "side": "B", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 136, "sequence": 1}
+    ],
+    "expected": {
+      "adapter_events": [{"action": "ADD", "side": "BID", "price": 4500250000000, "size": 5, "order_id": 101, "flags": 136, "norm_flags": 0, "sequence": 1, "subsequence": 0}],
+      "clean_equals_adapter": true,
+      "rejected_reasons": [],
+      "validator_stats": {"n_validated": 1, "n_rejected": 0, "n_warmup_skip": 0},
+      "final_orders": [{"order_id": 101, "side": "BID", "price": 4500250000000, "size": 5}],
+      "mbp1_rows": [{"sequence": 1, "action": "ADD", "flags": 136, "bid_px_00": 4500.25, "bid_sz_00": 5}],
+      "reconstruction_stats": {"n_events": 1, "n_rows_emitted": 1, "n_orphan_cancel": 0, "n_orphan_modify": 0}
+    }
+  }
+]
