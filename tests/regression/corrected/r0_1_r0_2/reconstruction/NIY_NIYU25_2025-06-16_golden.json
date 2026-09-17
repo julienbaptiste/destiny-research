@@ -1,0 +1,62 @@
+{
+  "checksum_columns": [
+    "ts_event",
+    "ts_recv",
+    "action",
+    "side",
+    "price",
+    "flags",
+    "sequence",
+    "subsequence",
+    "bid_px_00",
+    "ask_px_00",
+    "bid_sz_00",
+    "ask_sz_00",
+    "bid_ct_00",
+    "ask_ct_00"
+  ],
+  "classification": "EXPECTED_CHANGE",
+  "contract": "NIYU25",
+  "date": "2025-06-16",
+  "decision_ref": "ADR-003",
+  "diff_signature": "01c35a096e76b66c45bdacf185376dae440dcf869cd9625cae0130d793230dcb",
+  "evidence_candidate_commit": "c731de7f41769a7234778e911a101a4afa4b07c5",
+  "format_version": 1,
+  "full_fingerprint": {
+    "batch_size": 100000,
+    "columns": [
+      "ts_event",
+      "ts_recv",
+      "action",
+      "side",
+      "price",
+      "flags",
+      "sequence",
+      "subsequence",
+      "bid_px_00",
+      "ask_px_00",
+      "bid_sz_00",
+      "ask_sz_00",
+      "bid_ct_00",
+      "ask_ct_00"
+    ],
+    "file_sha256": "7206914936155f1b87176f92a635d6e506993493a1ba6ff53c1df41a5c0f3c39",
+    "file_size_bytes": 10708787,
+    "row_count": 473991,
+    "rows_hashed": 473991,
+    "schema": "ts_event: uint64 not null\nts_recv: uint64 not null\naction: string not null\nside: string not null\nprice: double not null\nflags: uint8 not null\nsequence: uint32 not null\nsubsequence: uint16 not null\nbid_px_00: double\nask_px_00: double\nbid_sz_00: uint32\nask_sz_00: uint32\nbid_ct_00: uint32\nask_ct_00: uint32",
+    "semantic_sha256": "ae8b4ccc865876e06469f336121ac50a9382df026a5d1560ab8010ea7d2fad7b"
+  },
+  "golden_namespace": "corrected/r0_1_r0_2",
+  "kind": "mbp1",
+  "product": "NIY",
+  "reconstruction_stats": {
+    "elapsed_seconds": 6.48,
+    "n_events": 506929,
+    "n_orphan_cancel": 0,
+    "n_orphan_modify": 0,
+    "n_rows_emitted": 473991
+  },
+  "sample_checksum_sha256": "84ce51dc669634cd34502d249e5b4e153fe1ec0d16fe92e67c7fd7751822104b",
+  "sample_rows_used": 50000
+}

@@ -1,0 +1,154 @@
+{
+  "classification_registry": "tests/safety_net/classifications/r0_1_r0_2.json",
+  "entries": {
+    "ES": {
+      "mbo": {
+        "decision_ref": "ADR-003",
+        "diff_signature": "d7301565e5850d4451a7f9cc2490ec1705671935047022fbd855f30fada923f7",
+        "golden": "tests/regression/corrected/r0_1_r0_2/normalization/ES_ESZ25_2025-10-01_golden.json",
+        "row_count": 9964579,
+        "sample_checksum_sha256": "b759762f280566ec13b174907da02f1585b7c30cd7e7b8503c1ecb3c5f64d879",
+        "semantic_sha256": "a586fc1bfa6561d7fbdcc1099016d7f67f8eb8a2207ddabd1dd487e7aa967ec9"
+      },
+      "mbp1": {
+        "decision_ref": "ADR-003",
+        "diff_signature": "f6947f7c9c7fc0b10da8a71bb6de66fcf75b45547e6c53efabdda996f7cb552f",
+        "golden": "tests/regression/corrected/r0_1_r0_2/reconstruction/ES_ESZ25_2025-10-01_golden.json",
+        "row_count": 8135395,
+        "sample_checksum_sha256": "0a11c60210613613279932b57358fd6cc9f84887e0409f7a7d44edf4f8530c13",
+        "semantic_sha256": "2f56384bb57347ed74749c15a5a750946bbfd9db83b10cd1980b11faefd0ab37"
+      }
+    },
+    "FDAX": {
+      "mbo": {
+        "decision_ref": "ADR-003",
+        "diff_signature": "73eb09a5a54b237d212d387c9848b43390ad4dd6650e70adcd8e17e5cf437475",
+        "golden": "tests/regression/corrected/r0_1_r0_2/normalization/FDAX_FDAXM25_2025-05-02_golden.json",
+        "row_count": 3088151,
+        "sample_checksum_sha256": "169b33c9f1f516ca51ff1298edca5e542ddec2d791483b5604912597fa545c25",
+        "semantic_sha256": "b373334a2334654d567c4832ea641d8b9674fd21f25a2b4d7848f55c2efe1e18"
+      },
+      "mbp1": {
+        "decision_ref": "ADR-003",
+        "diff_signature": "26a82e3b5bd9ccacf0f780e06cf424bf8e1eb5e6d103f9e30fadc63bfb0e70f2",
+        "golden": "tests/regression/corrected/r0_1_r0_2/reconstruction/FDAX_FDAXM25_2025-05-02_golden.json",
+        "row_count": 2968920,
+        "sample_checksum_sha256": "ae3057cbc7e386cf240cd746153fd4b8cd17a7e934783d07ee118342b0942f4a",
+        "semantic_sha256": "10c5ca90b69cd2098767dc18efe119f478aa13540ddb79ef099ff032969007f8"
+      }
+    },
+    "FESX": {
+      "mbo": {
+        "decision_ref": "ADR-003",
+        "diff_signature": "1b425225e60184678fadf684ed9d3fbcd269258ed2cac93ddc25b6ffeede3b93",
+        "golden": "tests/regression/corrected/r0_1_r0_2/normalization/FESX_FESXM25_2025-05-02_golden.json",
+        "row_count": 3652546,
+        "sample_checksum_sha256": "cd0d87fdbee131526bccfd9b1e7652d5f2e76a2e335c820a4c45de91be0ac7b3",
+        "semantic_sha256": "0d57f213e62533471195208994210dfd416b9b3d2c57c52fa08a7e36c1b5dc38"
+      },
+      "mbp1": {
+        "decision_ref": "ADR-003",
+        "diff_signature": "525887c367b18cbad9f5cd68c37f9c60e5864d9dee7ede42bf3bf44c901b82ba",
+        "golden": "tests/regression/corrected/r0_1_r0_2/reconstruction/FESX_FESXM25_2025-05-02_golden.json",
+        "row_count": 3082927,
+        "sample_checksum_sha256": "f49810d1752edce71dfecac73dde2e31bc4b7620c2322088694076d14ebfc790",
+        "semantic_sha256": "5622f87887d18f9f91a79d4530c62645ab8267cf5b98e46735f4c0eda3c0be64"
+      }
+    },
+    "HSI": {
+      "mbo": {
+        "decision_ref": "ADR-003/ADR-004",
+        "diff_signature": "2a3567bcc3e11b0c2434b9c817a9e97c419f62e7e12b8f22bbc6c67d8323286d",
+        "golden": "tests/regression/corrected/r0_1_r0_2/normalization/HSI_HSIG26_2026-02-03_golden.json",
+        "row_count": 10322945,
+        "sample_checksum_sha256": "62039db2c7184cfc48e0598752194fe6f11c065b2a6adc629e1965ca31f232a0",
+        "semantic_sha256": "eb993843314db79c92cdfc704fa000904e78f621ee9f09960e9dd2da2d925be9"
+      },
+      "mbp1": {
+        "decision_ref": "ADR-003/ADR-004",
+        "diff_signature": "6df0e4d12ba1cbd5dc4273ba460c453f309cd9252f07d853330be62449407fab",
+        "golden": "tests/regression/corrected/r0_1_r0_2/reconstruction/HSI_HSIG26_2026-02-03_golden.json",
+        "row_count": 10071753,
+        "sample_checksum_sha256": "3500b0ef262290de753310df01f39ecef25f6ae7fa301bda63ecf5b5098e35a8",
+        "semantic_sha256": "5b99ae8652b24585723af658bcc2bc32a927901f4270c0a29e1d98a2382a8a2c"
+      }
+    },
+    "MHI": {
+      "mbo": {
+        "decision_ref": "ADR-003/ADR-004",
+        "diff_signature": "c5e5c42ab7dd1be4be1e26f5a1c8c2953bceb2988031f4fe589771913b3eb3da",
+        "golden": "tests/regression/corrected/r0_1_r0_2/normalization/MHI_MHIG26_2026-02-03_golden.json",
+        "row_count": 7140532,
+        "sample_checksum_sha256": "2f25b5b8ff8e48b90089688fb0f011d37885b57fe184f260dbf412178a632d18",
+        "semantic_sha256": "a3324391efef8ee05deec429b7a98abe1707ad9a966ef1f4704a2223680fa8b7"
+      },
+      "mbp1": {
+        "decision_ref": "ADR-003/ADR-004",
+        "diff_signature": "4399f31fca77cf0e85e014be40c16c885bc23944bc0700e790e872d360d71ded",
+        "golden": "tests/regression/corrected/r0_1_r0_2/reconstruction/MHI_MHIG26_2026-02-03_golden.json",
+        "row_count": 6936308,
+        "sample_checksum_sha256": "392790f7efa36970f0ce430e539fbd6a614d3acf37d6ae82616c626f726c9ef8",
+        "semantic_sha256": "2e9b3b75beb8c2d0c8190c9fe25a39561626d640ea79b982b784315d84fcbe53"
+      }
+    },
+    "NIY": {
+      "mbo": {
+        "decision_ref": "ADR-003",
+        "diff_signature": "d0e0d264e15d95621fe399836e9d94e7c07cc0588eadcd3d84004ba1e7536566",
+        "golden": "tests/regression/corrected/r0_1_r0_2/normalization/NIY_NIYU25_2025-06-16_golden.json",
+        "row_count": 506929,
+        "sample_checksum_sha256": "7d1c3b17430f786714764ac0ab42a550aa647916c12222f3862fc91c9802c8e5",
+        "semantic_sha256": "cd6c0e569c67cd9c8edc506dfc90142903a85de5554607553503e878fda158e5"
+      },
+      "mbp1": {
+        "decision_ref": "ADR-003",
+        "diff_signature": "01c35a096e76b66c45bdacf185376dae440dcf869cd9625cae0130d793230dcb",
+        "golden": "tests/regression/corrected/r0_1_r0_2/reconstruction/NIY_NIYU25_2025-06-16_golden.json",
+        "row_count": 473991,
+        "sample_checksum_sha256": "84ce51dc669634cd34502d249e5b4e153fe1ec0d16fe92e67c7fd7751822104b",
+        "semantic_sha256": "ae8b4ccc865876e06469f336121ac50a9382df026a5d1560ab8010ea7d2fad7b"
+      }
+    }
+  },
+  "evidence_candidate_commit": "c731de7f41769a7234778e911a101a4afa4b07c5",
+  "format_version": 1,
+  "golden_namespace": "corrected/r0_1_r0_2",
+  "normalization_checksum_columns": [
+    "ts_event",
+    "ts_recv",
+    "action",
+    "side",
+    "price",
+    "size",
+    "order_id",
+    "flags",
+    "norm_flags",
+    "sequence",
+    "subsequence"
+  ],
+  "products": [
+    "ES",
+    "NIY",
+    "FDAX",
+    "FESX",
+    "HSI",
+    "MHI"
+  ],
+  "reconstruction_checksum_columns": [
+    "ts_event",
+    "ts_recv",
+    "action",
+    "side",
+    "price",
+    "flags",
+    "sequence",
+    "subsequence",
+    "bid_px_00",
+    "ask_px_00",
+    "bid_sz_00",
+    "ask_sz_00",
+    "bid_ct_00",
+    "ask_ct_00"
+  ],
+  "reviewed_date": "2026-09-17"
+}

@@ -1,0 +1,63 @@
+{
+  "checksum_columns": [
+    "ts_event",
+    "ts_recv",
+    "action",
+    "side",
+    "price",
+    "size",
+    "order_id",
+    "flags",
+    "norm_flags",
+    "sequence",
+    "subsequence"
+  ],
+  "classification": "EXPECTED_CHANGE",
+  "contract": "FESXM25",
+  "date": "2025-05-02",
+  "decision_ref": "ADR-003",
+  "diff_signature": "1b425225e60184678fadf684ed9d3fbcd269258ed2cac93ddc25b6ffeede3b93",
+  "evidence_candidate_commit": "c731de7f41769a7234778e911a101a4afa4b07c5",
+  "format_version": 1,
+  "full_fingerprint": {
+    "batch_size": 100000,
+    "columns": [
+      "ts_event",
+      "ts_recv",
+      "venue",
+      "product",
+      "contract",
+      "action",
+      "side",
+      "price",
+      "size",
+      "order_id",
+      "flags",
+      "norm_flags",
+      "sequence",
+      "subsequence",
+      "publisher_id",
+      "instrument_id"
+    ],
+    "file_sha256": "99de81e9de261263d60413465b32d7811c744a947c925daadf3e9c5b9e9da38e",
+    "file_size_bytes": 64074338,
+    "row_count": 3652546,
+    "rows_hashed": 3652546,
+    "schema": "ts_event: uint64 not null\nts_recv: uint64 not null\nvenue: dictionary<values=string, indices=int8, ordered=0> not null\nproduct: dictionary<values=string, indices=int8, ordered=0> not null\ncontract: dictionary<values=string, indices=int16, ordered=0> not null\naction: dictionary<values=string, indices=int8, ordered=0> not null\nside: dictionary<values=string, indices=int8, ordered=0> not null\nprice: int64 not null\nsize: uint32 not null\norder_id: uint64 not null\nflags: uint8 not null\nnorm_flags: uint16 not null\nsequence: uint32 not null\nsubsequence: uint16 not null\npublisher_id: uint16 not null\ninstrument_id: uint32 not null",
+    "semantic_sha256": "0d57f213e62533471195208994210dfd416b9b3d2c57c52fa08a7e36c1b5dc38"
+  },
+  "golden_namespace": "corrected/r0_1_r0_2",
+  "kind": "mbo",
+  "product": "FESX",
+  "reject_reason_distribution": {},
+  "rejected_fingerprint": null,
+  "sample_checksum_sha256": "cd0d87fdbee131526bccfd9b1e7652d5f2e76a2e335c820a4c45de91be0ac7b3",
+  "sample_rows_used": 50000,
+  "validator_stats": {
+    "date": "20250502",
+    "mode": "STRICT",
+    "n_rejected": 0,
+    "n_validated": 3652546,
+    "n_warmup_skip": 4292
+  }
+}
