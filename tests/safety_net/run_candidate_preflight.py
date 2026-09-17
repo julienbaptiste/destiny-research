@@ -92,6 +92,7 @@ def main() -> int:
                 "-m",
                 "pytest",
                 "tests/normative/test_canonical_schema.py",
+                "tests/normative/test_hkex_candidate_semantics.py",
                 "tests/normative/test_normative_fixtures.py",
                 "-v",
             ],
