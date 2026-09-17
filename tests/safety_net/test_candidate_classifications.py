@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
-from classify_candidate_evidence import _validate_registry
+_THIS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_THIS_DIR))
+
+from classify_candidate_evidence import _validate_registry  # noqa: E402
 
 
-_REGISTRY = Path(__file__).resolve().parent / "classifications" / "r0_1_r0_2.json"
+_REGISTRY = _THIS_DIR / "classifications" / "r0_1_r0_2.json"
 _REQUIRED_PRODUCTS = {"ES", "NIY", "FDAX", "FESX", "HSI", "MHI"}
 
 
