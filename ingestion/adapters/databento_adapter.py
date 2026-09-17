@@ -299,9 +299,10 @@ class DatabentoAdapter(BaseAdapter):
             return None
         side = Side.DATABENTO_MAP.get(str(raw_event.side), Side.NONE)
 
-        # Canonical flags intentionally preserve Databento provider bits. Bit
-        # 0x01 has no canonical meaning and is cleared if present upstream.
-        flags = raw_flags & 0xFE
+        # Representation normalization is lossless here: preserve every raw
+        # provider/control bit. Canonical semantics only assign meanings to the
+        # documented subset; reserved/provider-specific bits remain auditable.
+        flags = raw_flags
         sequence = int(raw_event.sequence)
 
         return {
