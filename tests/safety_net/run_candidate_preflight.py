@@ -73,7 +73,7 @@ def main() -> int:
             ],
         ),
         (
-            "Safety-net detector and migration self-tests",
+            "Safety-net detector and failure-atomicity self-tests",
             [
                 sys.executable,
                 "-m",
@@ -81,6 +81,7 @@ def main() -> int:
                 "tests/safety_net/test_fingerprint.py",
                 "tests/safety_net/test_canary_helpers.py",
                 "tests/safety_net/test_diff_outputs.py",
+                "tests/safety_net/test_ingest_atomicity.py",
                 "-v",
             ],
         ),
