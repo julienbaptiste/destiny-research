@@ -14,7 +14,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import sys
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -120,12 +119,37 @@ class _WriterContext:
         self.rejected_buf.clear()
 
     def close(self) -> None:
+        """Flush all accepted rows and finalize both Parquet files."""
         self.flush_clean()
         self.flush_rejected()
         if self.clean_writer is not None:
             self.clean_writer.close()
+            self.clean_writer = None
         if self.rejected_writer is not None:
             self.rejected_writer.close()
+            self.rejected_writer = None
+
+    def abort(self) -> None:
+        """Discard buffers and remove any partially written session outputs."""
+        self.clean_buf.clear()
+        self.rejected_buf.clear()
+
+        # Closing writes Parquet footers, so partial files may become readable.
+        # They must therefore be removed unconditionally after an aborted run.
+        for writer_name in ("clean_writer", "rejected_writer"):
+            writer = getattr(self, writer_name)
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:
+                    log.exception("Failed to close aborted %s", writer_name)
+                setattr(self, writer_name, None)
+
+        for path in (self.clean_path, self.rejected_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                log.exception("Failed to remove partial ingestion output %s", path)
 
 
 def ingest_file(
@@ -158,6 +182,7 @@ def ingest_file(
 
     n_total = 0
     n_dropped = 0
+    completed = False
 
     try:
         for info in adapter.list_instruments():
@@ -235,11 +260,22 @@ def ingest_file(
             if mode == ValidationMode.LOOSE:
                 ctx.append_clean(mark_validation_anomaly(event))
 
-    finally:
-        # Always flush what was already accepted before propagating a hard error.
+        # Only successful full-session iteration is allowed to finalize files.
         for ctx in writer_ctx.values():
             ctx.close()
-        adapter.close_session()
+        completed = True
+
+    finally:
+        if not completed:
+            for ctx in writer_ctx.values():
+                ctx.abort()
+        try:
+            adapter.close_session()
+        except Exception:
+            # Do not hide the original ingestion exception when cleanup fails.
+            if completed:
+                raise
+            log.exception("Adapter cleanup failed after aborted ingestion")
 
     counts = {contract: ctx.n_clean for contract, ctx in writer_ctx.items()}
 
@@ -295,12 +331,9 @@ def ingest_product(
                 verbose=verbose,
             )
         except Exception:
+            # Batch mode is intentionally best-effort across independent days.
+            # ingest_file() has already removed all partial outputs for this day.
             log.exception("Error processing %s", raw_path)
-            if adapter._is_open:  # defensive cleanup after partial open
-                try:
-                    adapter.close_session()
-                except Exception:
-                    log.exception("Adapter cleanup failed")
 
 
 def _register_instrument(
@@ -410,6 +443,16 @@ def _resolve_data_root(args: argparse.Namespace) -> Path:
     return Path(env) if env else _DEFAULT_DATA_ROOT
 
 
+def _data_root_from_raw_path(raw_path: Path) -> Path | None:
+    """Recover the historical data root from a path containing a `data` segment."""
+    parts = raw_path.parts
+    try:
+        data_index = next(index for index, part in enumerate(parts) if part == "data")
+    except StopIteration:
+        return None
+    return Path(*parts[: data_index + 1])
+
+
 def _cmd_file(args: argparse.Namespace) -> None:
     raw_path = Path(args.path)
     if not raw_path.exists():
@@ -425,10 +468,11 @@ def _cmd_file(args: argparse.Namespace) -> None:
     if session_date is None:
         raise ValueError(f"Cannot extract date from {raw_path.name}")
 
+    data_root = _data_root_from_raw_path(raw_path) or _resolve_data_root(args)
     counts = ingest_file(
         adapter=_get_adapter(provider),
         raw_path=raw_path,
-        normalized_dir=_resolve_data_root(args) / "normalized",
+        normalized_dir=data_root / "normalized",
         session_date=session_date,
         mode=args.mode,
         verbose=True,
