@@ -124,6 +124,8 @@ class HKEXAdapter(BaseAdapter):
         self._n_mod_orders = 0
         self._n_synthetic_cancels = 0
         self._n_unresolved_deletes = 0
+        self._n_unresolved_trade_orders = 0
+        self._n_trade_size_overrun = 0
         self._n_order_id_zero_trades = 0
         self._n_non_printable_trades = 0
 
@@ -526,6 +528,19 @@ class HKEXAdapter(BaseAdapter):
                 }
             ]
 
+        key = self._shadow_key(orderbook_id, order_id, passive_side)
+        cached = self._order_sizes.get(key)
+        mutation_anomaly = cached is None
+        if cached is None:
+            self._n_unresolved_trade_orders += 1
+        elif size > cached[0]:
+            mutation_anomaly = True
+            self._n_trade_size_overrun += 1
+
+        synthetic_norm_flags = coarse | int(NormFlags.N_SYNTHETIC)
+        if mutation_anomaly:
+            synthetic_norm_flags |= int(NormFlags.N_VALIDATION_ANOMALY)
+
         subsequences = self._allocate_subsequence_range(sequence, 3)
         common = {
             "ts_event": ts_event,
@@ -554,7 +569,7 @@ class HKEXAdapter(BaseAdapter):
             "action": Action.FILL,
             "side": passive_side,
             "flags": 0,
-            "norm_flags": coarse | int(NormFlags.N_SYNTHETIC),
+            "norm_flags": synthetic_norm_flags,
             "subsequence": subsequences[1],
         }
         cancel_event = {
@@ -562,14 +577,12 @@ class HKEXAdapter(BaseAdapter):
             "action": Action.CANCEL,
             "side": passive_side,
             "flags": flags_final,
-            "norm_flags": coarse | int(NormFlags.N_SYNTHETIC),
+            "norm_flags": synthetic_norm_flags,
             "subsequence": subsequences[2],
         }
 
         self._n_synthetic_cancels += 1
 
-        key = self._shadow_key(orderbook_id, order_id, passive_side)
-        cached = self._order_sizes.get(key)
         if cached is not None:
             cached_size, cached_price = cached
             residual = max(0, cached_size - size)
@@ -602,6 +615,8 @@ class HKEXAdapter(BaseAdapter):
                 "n_mod_orders": self._n_mod_orders,
                 "n_synthetic_cancels": self._n_synthetic_cancels,
                 "n_unresolved_deletes": self._n_unresolved_deletes,
+                "n_unresolved_trade_orders": self._n_unresolved_trade_orders,
+                "n_trade_size_overrun": self._n_trade_size_overrun,
                 "n_order_id_zero_trades": self._n_order_id_zero_trades,
                 "n_non_printable_trades": self._n_non_printable_trades,
             }
