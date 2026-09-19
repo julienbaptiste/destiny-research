@@ -78,7 +78,7 @@ _AGGRESSOR_SIDE_MAP: dict[int, str] = {
 
 _RE_HKEX_FUTURE = re.compile(r"^([A-Z]{2,4})([FGHJKMNQUVXZ])(\d)$")
 
-_DEFAULT_BATCH_SIZE_ROWS = 200_000
+_DEFAULT_BATCH_SIZE_ROWS = 50_000
 
 
 def _normalize_expiry_year(single_digit: str, session_date: date) -> int:
@@ -301,8 +301,9 @@ class HKEXAdapter(BaseAdapter):
 
         os.makedirs("/tmp/duckdb_hkex_spill", exist_ok=True)
         con = duckdb.connect()
-        con.execute("SET memory_limit='6GB'")
+        con.execute("SET memory_limit='3GB'")
         con.execute("SET temp_directory='/tmp/duckdb_hkex_spill'")
+        con.execute("SET max_temp_directory_size='20GB'")
         reader = con.execute(query).fetch_record_batch(self._batch_size_rows)
 
         try:
